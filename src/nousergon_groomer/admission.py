@@ -52,19 +52,31 @@ class AdmissionController:
 
     # -- §4.2: WIP accounting ----------------------------------------------
 
+    # All non-terminal PR states that count toward WIP. A PR in any of these
+    # states occupies a reviewer/CI slot and is charged (§4.2).
+    _WIP_PR_STATES = frozenset(
+        {
+            ItemState.OPEN_CLEAN_GREEN,
+            ItemState.OPEN_RED_CI,
+            ItemState.OPEN_DIRTY,
+            ItemState.OPEN_DRAFT,
+            ItemState.OPEN_PENDING_CI,
+        }
+    )
+
     @staticmethod
     def current_wip(items: list[Item]) -> int:
         """Count open, non-terminal PRs — every carried in-flight PR (§4.2).
 
-        A PR counts iff it is a PR and its state is ``OPEN`` or ``DRAFT``.
-        ``CLOSED`` and ``MERGED`` are terminal and do not count. Issues never
-        count toward WIP (they do not occupy a merge slot).
+        A PR counts iff it is a PR and its state is one of the open, non-
+        terminal PR states. ``CLOSED``, ``MERGED``, and ``DO_NOT_GROOM`` are
+        terminal and do not count. Issues never count toward WIP (they do
+        not occupy a merge slot).
         """
         return sum(
             1
             for item in items
-            if item.kind is ItemKind.PR
-            and item.state in (ItemState.OPEN, ItemState.DRAFT)
+            if item.kind is ItemKind.PR and item.state in AdmissionController._WIP_PR_STATES
         )
 
     def at_ceiling(self, items: list[Item]) -> bool:
@@ -81,8 +93,9 @@ class AdmissionController:
         Three gates, checked in order; the first failing gate denies and
         names itself in ``reason``:
 
-        1. **Actionable & open** — ``issue`` must be an ``OPEN`` issue. A PR,
-           a closed issue, or a draft cannot be admitted.
+        1. **Actionable & open** — ``issue`` must be an ``OPEN_ISSUE_ACTIONABLE``
+           issue. A PR, a closed issue, a blocked issue, or a waiting issue
+           cannot be admitted.
         2. **WIP not saturated** (§4.1) — the ceiling must not be reached.
         3. **No unsatisfied dependencies** (§4.3) — the issue must not be
            blocked by any of its declared dependencies against ``world``.
@@ -97,10 +110,10 @@ class AdmissionController:
             return AdmissionDecision(
                 admitted=False, reason="not an issue", wip=wip, ceiling=self.wip_ceiling
             )
-        if issue.state is not ItemState.OPEN:
+        if issue.state is not ItemState.OPEN_ISSUE_ACTIONABLE:
             return AdmissionDecision(
                 admitted=False,
-                reason=f"issue not open (state={issue.state.value})",
+                reason=f"issue not actionable (state={issue.state.value})",
                 wip=wip,
                 ceiling=self.wip_ceiling,
             )
