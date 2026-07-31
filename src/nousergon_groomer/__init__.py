@@ -30,6 +30,12 @@ from .config import (
     write_default_config,
 )
 from .disposition import compute_disposition
+from .github_executor import (
+    ExecutorAbortError,
+    ExecutorError,
+    ExecutorResult,
+    GitHubExecutor,
+)
 from .github_snapshot import GitHubSnapshot, SnapshotError
 from .model_provider import ModelError, ModelProvider, OpenAICompatibleProvider
 from .models import (
@@ -57,6 +63,10 @@ __all__ = [
     "DependencyKind",
     "Disposition",
     "DispositionKind",
+    "ExecutorAbortError",
+    "ExecutorError",
+    "ExecutorResult",
+    "GitHubExecutor",
     "GitHubSnapshot",
     "Item",
     "ItemKind",
