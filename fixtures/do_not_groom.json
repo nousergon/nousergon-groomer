@@ -1,0 +1,21 @@
+{
+  "description": "An item marked do-not-groom → TERMINAL (§9 carve-out 2: untouched)",
+  "items": [
+    {
+      "id": "i1",
+      "kind": "issue",
+      "state": "do_not_groom",
+      "title": "Do not groom this"
+    }
+  ],
+  "world": {
+    "s3_objects": [],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": [],
+    "absent_labels": []
+  },
+  "expected": {
+    "i1": {"kind": "terminal"}
+  }
+}

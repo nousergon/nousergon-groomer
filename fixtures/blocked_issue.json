@@ -1,0 +1,25 @@
+{
+  "description": "An issue blocked on an S3 object → BLOCKED naming the chain",
+  "items": [
+    {
+      "id": "i1",
+      "kind": "issue",
+      "state": "open_issue_actionable",
+      "title": "Build feature Y",
+      "labels": [],
+      "declared_dependencies": [
+        {"kind": "s3_object", "target": "s3://alpha-engine-research/data/daily/2026-07-31"}
+      ]
+    }
+  ],
+  "world": {
+    "s3_objects": [],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": [],
+    "absent_labels": []
+  },
+  "expected": {
+    "i1": {"kind": "blocked"}
+  }
+}
