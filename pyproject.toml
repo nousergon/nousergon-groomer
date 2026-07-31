@@ -26,6 +26,9 @@ dev = [
 model = [
     "httpx>=0.24",
 ]
+github = [
+    "httpx>=0.24",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -39,7 +42,7 @@ select = ["E", "W", "F", "I", "UP", "B", "C4", "S"]
 ignore = ["E501", "UP045"]  # UP045 (Optional→X|None) breaks pydantic v2 on py3.9
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]
+"tests/*" = ["S101", "S105", "S106"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

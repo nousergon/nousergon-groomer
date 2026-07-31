@@ -1,0 +1,255 @@
+"""Contract tests for the GitHub snapshot adapter (issue #22)."""
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from nousergon_groomer.github_snapshot import GitHubSnapshot, SnapshotError
+from nousergon_groomer.models import ItemKind, ItemState
+
+
+def _mock_response(status_code: int, json_data: object, headers: dict | None = None) -> MagicMock:
+    response = MagicMock()
+    response.status_code = status_code
+    response.json.return_value = json_data
+    response.text = str(json_data)
+    response.headers = headers or {}
+    return response
+
+
+def _issue(
+    number: int,
+    *,
+    title: str = "Issue",
+    labels: list[str] | None = None,
+    body: str = "",
+) -> dict:
+    return {
+        "number": number,
+        "title": title,
+        "body": body,
+        "labels": [{"name": label} for label in (labels or [])],
+    }
+
+
+def _pr(
+    number: int,
+    *,
+    title: str = "PR",
+    draft: bool = False,
+    mergeable: bool | None = True,
+    ci_state: str | None = "SUCCESS",
+    labels: list[str] | None = None,
+    body: str = "",
+    merged_at: str | None = None,
+) -> dict:
+    payload = {
+        "number": number,
+        "title": title,
+        "body": body,
+        "draft": draft,
+        "mergeable": mergeable,
+        "labels": [{"name": label} for label in (labels or [])],
+        "merged_at": merged_at,
+    }
+    if ci_state is not None:
+        payload["statusCheckRollup"] = {"state": ci_state}
+    return payload
+
+
+@pytest.fixture
+def mock_client() -> MagicMock:
+    return MagicMock()
+
+
+@pytest.fixture
+def snapshot(mock_client: MagicMock) -> GitHubSnapshot:
+    return GitHubSnapshot(token="test-token", http_client=mock_client)
+
+
+def test_construct_with_token(mock_client: MagicMock) -> None:
+    snap = GitHubSnapshot(token="ghp_test", http_client=mock_client)
+    assert snap._token == "ghp_test"
+
+
+def test_missing_token_raises_value_error(mock_client: MagicMock) -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        GitHubSnapshot(token="", http_client=mock_client)
+    with pytest.raises(ValueError, match="non-empty"):
+        GitHubSnapshot(token="   ", http_client=mock_client)
+
+
+def test_fetch_calls_expected_endpoints(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(1)]),
+        _mock_response(200, []),
+        _mock_response(200, [_issue(2)]),
+        _mock_response(200, []),
+    ]
+
+    snapshot.fetch("nousergon/nousergon-groomer")
+
+    assert mock_client.get.call_count == 4
+    paths = [call.args[0] for call in mock_client.get.call_args_list]
+    assert paths == [
+        "/repos/nousergon/nousergon-groomer/issues",
+        "/repos/nousergon/nousergon-groomer/pulls",
+        "/repos/nousergon/nousergon-groomer/issues",
+        "/repos/nousergon/nousergon-groomer/pulls",
+    ]
+    states = [call.kwargs["params"]["state"] for call in mock_client.get.call_args_list]
+    assert states == ["open", "open", "closed", "closed"]
+
+
+def test_clean_green_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, []),
+        _mock_response(200, [_pr(10, mergeable=True, ci_state="SUCCESS")]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    pr = next(item for item in items if item.kind is ItemKind.PR)
+    assert pr.state is ItemState.OPEN_CLEAN_GREEN
+    assert pr.ci_green is True
+    assert pr.mergeable is True
+
+
+def test_draft_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, []),
+        _mock_response(200, [_pr(11, draft=True)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    pr = items[0]
+    assert pr.state is ItemState.OPEN_DRAFT
+    assert pr.is_draft is True
+
+
+def test_dirty_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, []),
+        _mock_response(200, [_pr(12, mergeable=False, ci_state="SUCCESS")]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    assert items[0].state is ItemState.OPEN_DIRTY
+
+
+def test_red_ci_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, []),
+        _mock_response(200, [_pr(13, mergeable=True, ci_state="FAILURE")]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    assert items[0].state is ItemState.OPEN_RED_CI
+    assert items[0].ci_green is False
+
+
+def test_pending_ci_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, []),
+        _mock_response(200, [_pr(14, mergeable=True, ci_state="PENDING")]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    assert items[0].state is ItemState.OPEN_PENDING_CI
+    assert items[0].ci_green is None
+
+
+def test_issue_without_linked_pr_is_actionable(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(20, title="Fix bug")]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    issue = items[0]
+    assert issue.kind is ItemKind.ISSUE
+    assert issue.state is ItemState.OPEN_ISSUE_ACTIONABLE
+
+
+def test_issue_with_linked_open_pr_is_waiting(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(21, title="Blocked issue")]),
+        _mock_response(200, [_pr(22, body="Fixes #21")]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    issue = next(item for item in items if item.kind is ItemKind.ISSUE)
+    assert issue.state is ItemState.OPEN_ISSUE_WAITING
+
+
+def test_api_404_raises_snapshot_error(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.return_value = _mock_response(404, {"message": "Not Found"})
+
+    with pytest.raises(SnapshotError, match="404"):
+        snapshot.fetch("owner/missing")
+
+
+def test_api_403_raises_snapshot_error(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.return_value = _mock_response(
+        403, {"message": "Forbidden"}, headers={"X-RateLimit-Remaining": "0"}
+    )
+
+    with pytest.raises(SnapshotError, match="rate limit"):
+        snapshot.fetch("owner/repo")
+
+
+def test_returned_items_are_valid(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(30, labels=["bug"])]),
+        _mock_response(
+            200,
+            [_pr(31, labels=["groom-reviewed"], mergeable=True, ci_state="SUCCESS")],
+        ),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    assert len(items) == 2
+    issue, pr = items
+    assert issue.id == "30"
+    assert issue.kind is ItemKind.ISSUE
+    assert issue.labels == ["bug"]
+    assert pr.id == "31"
+    assert pr.kind is ItemKind.PR
+    assert pr.labels == ["groom-reviewed"]
+
+
+def test_terminal_items_from_closed_and_merged(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    closed_issue = _issue(40)
+    merged_pr = _pr(41, merged_at="2026-01-01T00:00:00Z")
+
+    mock_client.get.side_effect = [
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, [closed_issue]),
+        _mock_response(200, [merged_pr]),
+    ]
+
+    _items, world = snapshot.fetch("owner/repo")
+    assert world.terminal_items == {"40", "41"}

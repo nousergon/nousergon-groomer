@@ -25,5 +25,5 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,config]"
+          pip install -e ".[dev,config,model,github]"
       - run: python -m pytest -q --cov --cov-report=term-missing

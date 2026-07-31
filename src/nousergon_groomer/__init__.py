@@ -30,6 +30,7 @@ from .config import (
     write_default_config,
 )
 from .disposition import compute_disposition
+from .github_snapshot import GitHubSnapshot, SnapshotError
 from .model_provider import ModelError, ModelProvider, OpenAICompatibleProvider
 from .models import (
     Dependency,
@@ -56,6 +57,7 @@ __all__ = [
     "DependencyKind",
     "Disposition",
     "DispositionKind",
+    "GitHubSnapshot",
     "Item",
     "ItemKind",
     "ItemState",
@@ -63,6 +65,7 @@ __all__ = [
     "ModelProvider",
     "ObservedGeneration",
     "OpenAICompatibleProvider",
+    "SnapshotError",
     "compute_disposition",
     "Reconciler",
     "ReconcilerConfig",
