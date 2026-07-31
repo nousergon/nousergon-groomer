@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nousergon-groomer"
+version = "0.1.0"
+description = "Deterministic backlog groomer core: disposition function, dependency evaluator, admission controller, lane classifier. The fixture-runnable control plane for the autonomous backlog-and-PR maintenance loop."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Brian McMahon" }]
+license = { text = "AGPL-3.0-only" }
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff==0.14.14",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "S"]
+ignore = ["E501", "UP045"]  # UP045 (Optional→X|None) breaks pydantic v2 on py3.9
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["nousergon_groomer"]
