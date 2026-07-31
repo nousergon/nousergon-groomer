@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-groomer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic backlog groomer core: disposition function, dependency evaluator, admission controller, lane classifier. The fixture-runnable control plane for the autonomous backlog-and-PR maintenance loop."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -25,12 +25,16 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff==0.14.14",
+    "build>=1.0",
 ]
 model = [
     "httpx>=0.24",
 ]
 github = [
     "httpx>=0.24",
+]
+all = [
+    "nousergon-groomer[config,model,github]",
 ]
 
 [tool.setuptools.packages.find]
