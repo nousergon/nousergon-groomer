@@ -15,14 +15,10 @@ def test_package_imports():
 
 def test_core_types_load():
     from nousergon_groomer.models import (
-        Dependency,
         DependencyKind,
-        Disposition,
         DispositionKind,
-        Item,
         ItemKind,
         ItemState,
-        ObservedGeneration,
     )
 
     assert ItemKind.ISSUE == "issue"
@@ -33,9 +29,9 @@ def test_core_types_load():
 
 def test_dependency_rejects_empty_target():
     """§3.1 — an unevaluable dependency is rejected at construction."""
-    from nousergon_groomer.models import Dependency, DependencyKind
-
     import pytest
+
+    from nousergon_groomer.models import Dependency, DependencyKind
 
     with pytest.raises(ValueError, match="non-empty"):
         Dependency(kind=DependencyKind.S3_OBJECT, target="")
