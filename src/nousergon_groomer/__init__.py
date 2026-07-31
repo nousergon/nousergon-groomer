@@ -33,6 +33,7 @@ from .models import (
     ItemState,
     ObservedGeneration,
 )
+from .reconciler import Reconciler, ReconcilerConfig, ReconcilerResult
 
 __all__ = [
     "Dependency",
@@ -45,6 +46,9 @@ __all__ = [
     "ItemState",
     "ObservedGeneration",
     "compute_disposition",
+    "Reconciler",
+    "ReconcilerConfig",
+    "ReconcilerResult",
 ]
 
 __version__ = "0.1.0"
