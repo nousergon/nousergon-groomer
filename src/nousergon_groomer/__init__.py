@@ -22,6 +22,7 @@ merge execution, PAT) lives in the private layer.
 from __future__ import annotations
 
 from .disposition import compute_disposition
+from .model_provider import ModelError, ModelProvider, OpenAICompatibleProvider
 from .models import (
     Dependency,
     DependencyEvaluation,
@@ -44,7 +45,10 @@ __all__ = [
     "Item",
     "ItemKind",
     "ItemState",
+    "ModelError",
+    "ModelProvider",
     "ObservedGeneration",
+    "OpenAICompatibleProvider",
     "compute_disposition",
     "Reconciler",
     "ReconcilerConfig",

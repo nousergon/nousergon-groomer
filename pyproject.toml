@@ -20,6 +20,9 @@ dev = [
     "pytest-cov>=4.0",
     "ruff==0.14.14",
 ]
+model = [
+    "httpx>=0.24",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
