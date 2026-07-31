@@ -145,13 +145,23 @@ class ObservedGeneration(BaseModel):
     Two items with equal :attr:`label_set_hash` and :attr:`deps_hash` have
     no declared-dependency or label change since ``generation`` was recorded,
     so the reconciler may skip re-evaluating them. ``generation`` is a
-    monotonically increasing counter owned by the reconciler.
+    monotonically increasing counter owned by the reconciler (the cycle
+    number); it is used for idempotency within a cycle, not to force
+    re-evaluation across cycles.
+
+    ``head_sha`` and ``body_hash`` extend the fingerprint to cover PR
+    force-pushes and body edits — a force-push changes the head SHA without
+    touching labels or deps, and a body edit can change the disposition
+    without touching deps. Both are ``None`` for items where they don't
+    apply (e.g. issues have no head SHA).
     """
 
     item_id: str
     generation: int
     label_set_hash: str
     deps_hash: str
+    head_sha: Optional[str] = None
+    body_hash: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
