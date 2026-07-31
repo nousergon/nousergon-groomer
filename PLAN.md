@@ -124,3 +124,39 @@ Issues 2-6 are scaffolded (code written, not yet tested). 7 depends on 3,4.
 - The model leaf (private — generative candidate changes)
 - Live GitHub state fetching (private)
 - The swap from existing sweeps to this core (follow-up epic, gated on #13 parity)
+
+## v0.2.0 — usable open-source tool (planned)
+
+v0.1.0 is a library. v0.2.0 makes it a tool external users can run against
+their own GitHub. The operational adapters go in THIS repo (public), with
+credentials injected at runtime via env vars — same pattern as `renovate`,
+`dependabot`, and `gh` itself.
+
+### Model provider constraint — never Anthropic
+
+The model interface is a **provider-agnostic protocol**. The default
+implementation uses **direct API calls to OpenAI-compatible endpoints** —
+the common denominator across xAI (Grok), Moonshot (Kimi), Zhipu (GLM),
+DeepSeek, and other providers.
+
+**Anthropic is never a default, never a dependency, never a code path in
+this repo.** This is a standing ruling (2026-07-24: zero Anthropic models in
+the internal router groups; 2026-07-25: all Anthropic references removed
+from groom/sweep infrastructure). The repo is not shaped around Anthropic's
+SDK, API conventions, or message format. The `ModelProvider` protocol uses
+a generic `complete(prompt, model, temperature) -> str` interface, and the
+default `OpenAICompatibleProvider` hits `/v1/chat/completions` — the format
+the non-Anthropic providers share.
+
+### v0.2.0 issue breakdown (to be filed)
+
+| Component | What | Public? |
+|---|---|---|
+| GitHub snapshot adapter | `gh`/API → `Item[]` + `ObservedWorld` | yes |
+| GitHub executor adapter | `ReconcilerResult` → actions | yes |
+| `ModelProvider` protocol | provider-agnostic interface | yes |
+| `OpenAICompatibleProvider` | default impl (xAI/Moonshot/Zhipu/DeepSeek) | yes |
+| CLI | `groomer run --repo --config --dry-run` | yes |
+| Config system | YAML for lanes/gates/WIP/model | yes |
+| Krepis router adapter | implements `ModelProvider` | no (private) |
+| Fleet config | lane defs, gate labels, tuned WIP | no (private) |

@@ -156,6 +156,64 @@ that scenario:
 | `do_not_groom` | item marked do-not-groom | TERMINAL |
 | `undecidable` | unobservable dependency | UNDECIDABLE |
 
+## Roadmap — v0.2.0 (usable tool) and beyond
+
+The v0.1.0 core is a **library** — pure logic over recorded state. To make it
+a **usable tool** that external users can point at their GitHub repo and run,
+v0.2.0 adds the operational adapters (public, credentials injected at runtime):
+
+- **GitHub snapshot adapter** — `gh`/API → `Item[]` + `ObservedWorld` (PAT via env var)
+- **GitHub executor adapter** — `ReconcilerResult` → merge, comment, create PR (PAT via env var)
+- **Pluggable model interface** — a `ModelProvider` protocol (see below)
+- **CLI** — `groomer run --repo foo/bar --config config.yaml --dry-run`
+- **Configuration system** — YAML for lanes, gates, WIP ceiling, model tiers
+
+The private layer (fleet-specific config, krepis router adapter, spot
+bootstrap, prompt templates) stays in `alpha-engine-config`.
+
+### Model provider — provider-agnostic, never Anthropic
+
+The model interface is a **provider-agnostic protocol**. The default
+implementation uses **direct API calls to OpenAI-compatible endpoints** — the
+common denominator across xAI (Grok), Moonshot (Kimi), Zhipu (GLM), DeepSeek,
+and other providers. **Anthropic is never a default and never a dependency.**
+
+```toml
+# pyproject.toml — optional dependencies, none required for the pure core
+[project.optional-dependencies]
+github = ["httpx>=0.24"]       # snapshot + executor adapters
+config = ["pyyaml>=6.0"]       # config system
+model  = ["openai>=1.0"]       # default OpenAI-compatible provider
+cli    = ["typer>=0.9"]        # CLI entry point
+# NOTE: "anthropic" is NEVER a dependency of this package.
+```
+
+The `ModelProvider` protocol:
+
+```python
+class ModelProvider(Protocol):
+    def complete(self, prompt: str, *, model: str, temperature: float = 0.0) -> str:
+        """Generate a completion via the provider's API."""
+        ...
+```
+
+The default `OpenAICompatibleProvider` works against any provider that
+exposes an OpenAI-compatible `/v1/chat/completions` endpoint (xAI, Moonshot,
+Zhipu, DeepSeek, local models via vLLM/Ollama). Configuration is by base_url
++ api_key + model_name — no vendor lock-in:
+
+```yaml
+# config.yaml
+model:
+  provider: openai-compatible
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  model: deepseek-chat
+```
+
+The nousergon private layer implements this protocol with a krepis router
+adapter (proprietary). External users plug in any provider they choose.
+
 ## Normative spec
 
 The [groom-sweep policy](https://github.com/nousergon/nous-ergon-ops/blob/main/policies/groom-sweep-policy.md)
