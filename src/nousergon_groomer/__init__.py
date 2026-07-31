@@ -21,6 +21,14 @@ merge execution, PAT) lives in the private layer.
 """
 from __future__ import annotations
 
+from .config import (
+    GateFamily,
+    GroomerConfig,
+    LaneConfig,
+    ModelConfig,
+    load_config,
+    write_default_config,
+)
 from .disposition import compute_disposition
 from .models import (
     Dependency,
@@ -36,6 +44,12 @@ from .models import (
 from .reconciler import Reconciler, ReconcilerConfig, ReconcilerResult
 
 __all__ = [
+    "GateFamily",
+    "GroomerConfig",
+    "LaneConfig",
+    "ModelConfig",
+    "load_config",
+    "write_default_config",
     "Dependency",
     "DependencyEvaluation",
     "DependencyKind",
