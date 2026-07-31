@@ -1,0 +1,47 @@
+{
+  "description": "WIP saturated (3 PRs, ceiling=3): a new actionable issue should be BLOCKED by admission, not ACT",
+  "config": {"wip_ceiling": 3},
+  "items": [
+    {
+      "id": "p1",
+      "kind": "pr",
+      "state": "open_clean_green",
+      "title": "PR 1",
+      "mergeable": true,
+      "ci_green": true
+    },
+    {
+      "id": "p2",
+      "kind": "pr",
+      "state": "open_clean_green",
+      "title": "PR 2",
+      "mergeable": true,
+      "ci_green": true
+    },
+    {
+      "id": "p3",
+      "kind": "pr",
+      "state": "open_pending_ci",
+      "title": "PR 3"
+    },
+    {
+      "id": "i1",
+      "kind": "issue",
+      "state": "open_issue_actionable",
+      "title": "New issue at ceiling"
+    }
+  ],
+  "world": {
+    "s3_objects": [],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": [],
+    "absent_labels": []
+  },
+  "expected": {
+    "p1": {"kind": "terminal"},
+    "p2": {"kind": "terminal"},
+    "p3": {"kind": "terminal"},
+    "i1": {"kind": "blocked"}
+  }
+}

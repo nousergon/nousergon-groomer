@@ -1,0 +1,26 @@
+{
+  "description": "A clean, green PR with a groom-reviewed lane label → ACT automerge",
+  "items": [
+    {
+      "id": "p1",
+      "kind": "pr",
+      "state": "open_clean_green",
+      "title": "Fix scanner liquidity gate",
+      "labels": ["groom-reviewed"],
+      "is_draft": false,
+      "mergeable": true,
+      "ci_green": true,
+      "security_threads": 0
+    }
+  ],
+  "world": {
+    "s3_objects": [],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": [],
+    "absent_labels": []
+  },
+  "expected": {
+    "p1": {"kind": "act", "action": "automerge"}
+  }
+}

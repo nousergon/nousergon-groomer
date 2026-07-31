@@ -1,0 +1,24 @@
+{
+  "description": "A PR with a gate:* label → TERMINAL (gated PRs are not auto-merge candidates; the gate must clear)",
+  "items": [
+    {
+      "id": "p1",
+      "kind": "pr",
+      "state": "open_clean_green",
+      "title": "Gated PR",
+      "labels": ["gate:weekly-sf"],
+      "mergeable": true,
+      "ci_green": true
+    }
+  ],
+  "world": {
+    "s3_objects": [],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": [],
+    "absent_labels": []
+  },
+  "expected": {
+    "p1": {"kind": "terminal"}
+  }
+}

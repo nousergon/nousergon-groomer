@@ -1,0 +1,24 @@
+{
+  "description": "An item with an unobservable dependency (s3_objects not reported) → UNDECIDABLE (§3 honest degradation)",
+  "items": [
+    {
+      "id": "i1",
+      "kind": "issue",
+      "state": "open_issue_actionable",
+      "title": "Depends on unobservable S3",
+      "declared_dependencies": [
+        {"kind": "s3_object", "target": "s3://bucket/key"}
+      ]
+    }
+  ],
+  "world": {
+    "s3_objects": null,
+    "s3_prefixes": null,
+    "terminal_items": null,
+    "pipeline_runs": null,
+    "absent_labels": null
+  },
+  "expected": {
+    "i1": {"kind": "undecidable"}
+  }
+}

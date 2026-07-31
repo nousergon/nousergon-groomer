@@ -1,0 +1,34 @@
+{
+  "description": "Transitive blocked: i1 depends on i2 being terminal; i2 is blocked on s3 → i1 BLOCKED naming the root cause",
+  "items": [
+    {
+      "id": "i1",
+      "kind": "issue",
+      "state": "open_issue_actionable",
+      "title": "Depends on i2",
+      "declared_dependencies": [
+        {"kind": "issue_terminal", "target": "i2"}
+      ]
+    },
+    {
+      "id": "i2",
+      "kind": "issue",
+      "state": "open_issue_blocked",
+      "title": "Blocked on S3",
+      "declared_dependencies": [
+        {"kind": "s3_object", "target": "s3://bucket/key"}
+      ]
+    }
+  ],
+  "world": {
+    "s3_objects": [],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": [],
+    "absent_labels": []
+  },
+  "expected": {
+    "i1": {"kind": "blocked"},
+    "i2": {"kind": "blocked"}
+  }
+}
