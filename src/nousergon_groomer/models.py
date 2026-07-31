@@ -31,17 +31,31 @@ class ItemKind(str, enum.Enum):
 class ItemState(str, enum.Enum):
     """Observed lifecycle states of a carried item.
 
-    These are *observed* states recorded from the source of truth (GitHub),
-    not dispositions. ``DRAFT`` is an observed PR sub-state; ``UNKNOWN`` is
-    the explicit "we could not classify the observed state" value — it must
-    never be silently coerced to ``OPEN`` (fail loud, §fail-loud).
+    This enumeration is the **totality surface** for §5.1: the disposition
+    function must map every value here to exactly one disposition. An
+    uncovered state is a defect in the function, not an acceptable gap.
+
+    The detailed states distinguish PR sub-states (green/red/dirty/draft/
+    pending) and issue sub-states (actionable/blocked/waiting) because the
+    disposition function's action depends on which — a red PR gets
+    "fix CI", a dirty PR gets "resolve conflicts", a green PR gets
+    "automerge or human review". Collapsing these into a single ``OPEN``
+    would force the disposition function to re-derive the sub-state from
+    other fields, which is exactly the §1.1 defect (mechanism leaking
+    into the spec).
     """
 
-    OPEN = "open"
-    CLOSED = "closed"
+    OPEN_CLEAN_GREEN = "open_clean_green"
+    OPEN_RED_CI = "open_red_ci"
+    OPEN_DIRTY = "open_dirty"
+    OPEN_DRAFT = "open_draft"
+    OPEN_PENDING_CI = "open_pending_ci"
+    OPEN_ISSUE_ACTIONABLE = "open_issue_actionable"
+    OPEN_ISSUE_BLOCKED = "open_issue_blocked"
+    OPEN_ISSUE_WAITING = "open_issue_waiting"
     MERGED = "merged"
-    DRAFT = "draft"
-    UNKNOWN = "unknown"
+    CLOSED = "closed"
+    DO_NOT_GROOM = "do_not_groom"
 
 
 class DependencyKind(str, enum.Enum):
@@ -220,8 +234,8 @@ class Item(BaseModel):
 
     @property
     def is_terminal(self) -> bool:
-        """True if the item is in a final state (CLOSED or MERGED)."""
-        return self.state in (ItemState.CLOSED, ItemState.MERGED)
+        """True if the item is in a final state (CLOSED, MERGED, or DO_NOT_GROOM)."""
+        return self.state in (ItemState.CLOSED, ItemState.MERGED, ItemState.DO_NOT_GROOM)
 
     @property
     def has_gate_label(self) -> bool:
