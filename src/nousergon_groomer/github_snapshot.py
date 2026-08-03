@@ -157,8 +157,9 @@ class GitHubSnapshot:
                         continue
                     pr["mergeable"] = detail.get("mergeable")
                     pr["mergeable_state"] = detail.get("mergeable_state")
-                    if "statusCheckRollup" in detail:
-                        pr["statusCheckRollup"] = detail["statusCheckRollup"]
+                    head_sha = (detail.get("head") or {}).get("sha")
+                    if head_sha:
+                        pr["_ci_green"] = self._fetch_ci_state(repo, head_sha)
                 except Exception as exc:
                     # Per-PR fetch is best-effort; fall back to (null) list data
                     # and surface the degradation in the logs instead of
@@ -179,7 +180,7 @@ class GitHubSnapshot:
             items.append(_issue_to_item(issue, kind=ItemKind.ISSUE, state=state))
 
         for pr in open_prs_raw:
-            ci_green = _parse_ci_from_rollup(pr)
+            ci_green = pr["_ci_green"] if "_ci_green" in pr else _parse_ci_from_rollup(pr)
             state = _derive_pr_state(pr, ci_green)
             items.append(
                 _issue_to_item(
@@ -201,6 +202,70 @@ class GitHubSnapshot:
 
         world = ObservedWorld(terminal_items=terminal_items)
         return items, world
+
+    def _fetch_ci_state(self, repo: str, sha: str) -> Optional[bool]:
+        """Derive CI green/red/pending for ``sha`` from the REST API.
+
+        **There is no ``statusCheckRollup`` in REST.** It is a GraphQL field, so
+        the per-PR REST endpoint never carries it (measured 2026-08-03: the only
+        matching key on ``GET /repos/{repo}/pulls/{n}`` is ``statuses_url``).
+        Reading it from a REST payload always yields ``None``, which sent every
+        non-dirty PR to ``OPEN_PENDING_CI`` and left the ``ci_red`` bucket
+        permanently empty (config#6170).
+
+        The rollup GitHub shows in its UI is the **union of two REST surfaces**,
+        and both are required:
+
+        - ``/commits/{sha}/check-runs`` — the Checks API (GitHub Actions).
+        - ``/commits/{sha}/status`` — the legacy Statuses API, still used by
+          some third-party integrations.
+
+        Consulting only the second is worse than consulting neither: measured
+        2026-08-03 on ``alpha-engine-config#5314``, ``/status`` reported
+        ``success`` while ``/check-runs`` reported **4 failures** against 4
+        successes. A fix built on the Statuses API alone would report that PR
+        green and would fail in the unsafe direction.
+
+        Returns ``True`` (all conclusive checks passed), ``False`` (at least one
+        failed), or ``None`` (still running, or nothing has reported).
+        """
+        failing = {"failure", "timed_out", "cancelled", "action_required", "stale"}
+        passing = {"success", "neutral", "skipped"}
+        saw_pending = False
+        saw_any = False
+
+        try:
+            runs = self._get_response(f"/repos/{repo}/commits/{sha}/check-runs", None).json()
+        except Exception as exc:
+            logger.warning("check-runs fetch failed for %s@%s: %s", repo, sha[:8], exc)
+            return None
+        for run in (runs or {}).get("check_runs", []) or []:
+            saw_any = True
+            if run.get("status") != "completed":
+                saw_pending = True
+                continue
+            conclusion = run.get("conclusion")
+            if conclusion in failing:
+                return False
+            if conclusion not in passing:
+                saw_pending = True
+
+        try:
+            combined = self._get_response(f"/repos/{repo}/commits/{sha}/status", None).json()
+        except Exception as exc:
+            logger.warning("commit status fetch failed for %s@%s: %s", repo, sha[:8], exc)
+            combined = {}
+        if (combined or {}).get("total_count"):
+            saw_any = True
+            state = combined.get("state")
+            if state == "failure" or state == "error":
+                return False
+            if state == "pending":
+                saw_pending = True
+
+        if not saw_any or saw_pending:
+            return None
+        return True
 
     def _get_paginated(self, path: str, params: dict[str, Any] | None = None) -> list[Any]:
         params = dict(params or {})

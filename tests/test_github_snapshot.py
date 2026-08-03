@@ -352,3 +352,125 @@ def test_pr_enrichment_failure_logs_warning_and_falls_back(
         and "owner/repo#98" in record.getMessage()
         for record in caplog.records
     )
+
+
+# --- config#6170: CI state comes from check-runs + statuses, never a REST rollup ---
+
+
+class _CIStubClient:
+    """Stub whose per-PR / check-runs / status responses are scripted by path."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.seen: list[str] = []
+
+    def get(self, path, params=None):  # noqa: D102
+        self.seen.append(path)
+        for suffix, payload in self.routes.items():
+            if path.endswith(suffix):
+                return _StubResponse(payload)
+        return _StubResponse([] if path.endswith("s") else {})
+
+    def close(self):  # noqa: D102
+        pass
+
+
+class _StubResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+        self.headers = {}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        return None
+
+
+def _snapshot_with(routes):
+    snap = GitHubSnapshot(token="t", http_client=_CIStubClient(routes))
+    return snap
+
+
+def test_failing_check_run_yields_ci_red_not_pending():
+    """A FAILURE conclusion must produce ci_green=False, not None (config#6170).
+
+    Before the fix `_parse_ci_from_rollup` read `statusCheckRollup` from a REST
+    payload that never carries it, so every PR landed in OPEN_PENDING_CI and the
+    ci_red bucket was permanently empty.
+    """
+    snap = _snapshot_with({
+        "/check-runs": {"check_runs": [
+            {"status": "completed", "conclusion": "failure"},
+            {"status": "completed", "conclusion": "success"},
+        ]},
+        "/status": {"total_count": 0, "state": "pending"},
+    })
+    assert snap._fetch_ci_state("o/r", "abc123") is False
+
+
+def test_statuses_api_alone_cannot_mask_a_failing_check_run():
+    """The union matters and fails in the safe direction.
+
+    Measured on alpha-engine-config#5314 (2026-08-03): /commits/{sha}/status
+    reported `success` with total_count=1 while /check-runs reported 4 failures.
+    A fix reading only the Statuses API would call that PR green.
+    """
+    snap = _snapshot_with({
+        "/check-runs": {"check_runs": [
+            {"status": "completed", "conclusion": "failure"},
+        ]},
+        "/status": {"total_count": 1, "state": "success"},
+    })
+    assert snap._fetch_ci_state("o/r", "abc123") is False
+
+
+def test_all_passing_yields_green():
+    snap = _snapshot_with({
+        "/check-runs": {"check_runs": [
+            {"status": "completed", "conclusion": "success"},
+            {"status": "completed", "conclusion": "skipped"},
+        ]},
+        "/status": {"total_count": 0},
+    })
+    assert snap._fetch_ci_state("o/r", "abc123") is True
+
+
+def test_in_progress_run_is_pending_not_green():
+    snap = _snapshot_with({
+        "/check-runs": {"check_runs": [
+            {"status": "in_progress", "conclusion": None},
+            {"status": "completed", "conclusion": "success"},
+        ]},
+        "/status": {"total_count": 0},
+    })
+    assert snap._fetch_ci_state("o/r", "abc123") is None
+
+
+def test_no_checks_reported_is_pending_not_green():
+    """Nothing reported is unobserved, not healthy (groom-sweep-policy §6.2)."""
+    snap = _snapshot_with({"/check-runs": {"check_runs": []}, "/status": {"total_count": 0}})
+    assert snap._fetch_ci_state("o/r", "abc123") is None
+
+
+def test_failing_commit_status_is_red_even_with_green_check_runs():
+    snap = _snapshot_with({
+        "/check-runs": {"check_runs": [{"status": "completed", "conclusion": "success"}]},
+        "/status": {"total_count": 2, "state": "failure"},
+    })
+    assert snap._fetch_ci_state("o/r", "abc123") is False
+
+
+def test_check_runs_fetch_failure_degrades_to_pending_and_logs(caplog):
+    class _Boom:
+        def get(self, path, params=None):
+            raise RuntimeError("boom")
+
+        def close(self):
+            pass
+
+    snap = GitHubSnapshot(token="t", http_client=_Boom())
+    with caplog.at_level("WARNING"):
+        assert snap._fetch_ci_state("o/r", "deadbeef") is None
+    assert "check-runs fetch failed" in caplog.text
