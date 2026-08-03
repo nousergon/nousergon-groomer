@@ -1,4 +1,8 @@
 nousergon-groomer
-Copyright (C) 2026 Brian McMahon
+Copyright (c) 2026 Brian McMahon
 
-AGPL-3.0-only. See LICENSE.
+MIT. See LICENSE.
+
+Relicensed from AGPL-3.0-only to MIT in 0.3.0 (2026-08-03). Releases up to and
+including 0.2.1 remain available under AGPL-3.0-only — a licence change is never
+retroactive, and anyone who took the code under the old terms keeps them.
