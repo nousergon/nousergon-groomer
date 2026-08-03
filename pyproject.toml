@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-groomer"
-version = "0.2.1"
+version = "0.3.0"
 description = "Deterministic backlog groomer core: disposition function, dependency evaluator, admission controller, lane classifier. The fixture-runnable control plane for the autonomous backlog-and-PR maintenance loop."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Brian McMahon" }]
-license = { text = "AGPL-3.0-only" }
+license = { text = "MIT" }
 dependencies = [
     "pydantic>=2.0",
 ]

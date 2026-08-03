@@ -12,7 +12,7 @@ harness (dispatch, merge execution, PAT) lives in the private layer.
 
 ## What this repo IS
 
-- **Public** (AGPL-3.0-only). Framework, contracts, and eval logic — the
+- **Public** (MIT). Framework, contracts, and eval logic — the
   "how rigorously we measure belief" tier — not strategy edge or secrets.
 - **Fixture-runnable (§8.1).** The entire test suite runs over recorded
   JSON snapshots with no network, no credentials, no model.
@@ -229,4 +229,9 @@ Implementation issues are filed on this repo (#2–#13).
 
 ## License
 
-AGPL-3.0-only. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Relicensed from AGPL-3.0-only in 0.3.0 (2026-08-03): this tool is not monetised and
+nothing paid depends on operating it, so network-use copyleft protected revenue
+nobody intends to earn while taxing the only outcome the repo exists for — being
+installed and tried. Releases up to 0.2.1 remain available under AGPL-3.0-only.

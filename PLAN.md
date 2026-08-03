@@ -6,7 +6,7 @@ The **deterministic control plane** for the autonomous backlog-and-PR
 maintenance loop. It is the §8.1 fixture-runnable core specified by
 `nous-ergon-ops/policies/groom-sweep-policy.md` (the "groom-sweep policy").
 
-This repo is **public** (AGPL-3.0), consistent with the nine existing
+This repo is **public** (MIT, relicensed 2026-08-03), consistent with the nine existing
 public alpha-engine repos. It contains framework/contracts/eval logic —
 the "how rigorously we measure belief" tier — not strategy edge or
 operational secrets.
