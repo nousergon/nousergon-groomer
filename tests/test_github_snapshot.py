@@ -1,6 +1,7 @@
 """Contract tests for the GitHub snapshot adapter (issue #22)."""
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -238,6 +239,59 @@ def test_returned_items_are_valid(snapshot: GitHubSnapshot, mock_client: MagicMo
     assert pr.labels == ["groom-reviewed"]
 
 
+def test_pr_from_list_with_null_mergeable_enriched_by_detail_endpoint(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    """Regression test for config#6168: list endpoint mergeable=null → per-PR fetch → dirty.
+
+    GitHub's LIST endpoint returns ``mergeable: null`` for every PR.
+    The single-PR endpoint returns the real value (e.g. ``mergeable: False``
+    and ``mergeable_state: "dirty"`` for a conflicting PR).  After enrichment
+    the PR must land in OPEN_DIRTY so the conflict-resolution pass fires.
+    """
+    list_pr = {
+        "number": 99,
+        "title": "conflicting PR from list",
+        "body": "",
+        "draft": False,
+        "mergeable": None,
+        "mergeable_state": None,
+        "labels": [],
+    }
+    detail_pr = {
+        "number": 99,
+        "title": "conflicting PR detail",
+        "body": "",
+        "draft": False,
+        "mergeable": False,
+        "mergeable_state": "dirty",
+        "labels": [],
+    }
+
+    # Ordering matches the fetch() call sequence:
+    #   1. open issues (paginated)
+    #   2. open PRs (paginated)
+    #   3. closed issues (paginated)
+    #   4. closed PRs (paginated)
+    #   5+. per-PR detail GETs (one per PR with mergeable=None)
+    mock_client.get.side_effect = [
+        _mock_response(200, []),               # open issues
+        _mock_response(200, [list_pr]),         # open PRs (list, mergeable=null)
+        _mock_response(200, []),               # closed issues
+        _mock_response(200, []),               # closed PRs
+        _mock_response(200, detail_pr),         # per-PR detail GET
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    pr = items[0]
+    assert pr.kind is ItemKind.PR
+    assert pr.state is ItemState.OPEN_DIRTY, (
+        f"Expected OPEN_DIRTY for mergeable=False / mergeable_state=dirty, "
+        f"got {pr.state}"
+    )
+    assert pr.mergeable is False
+
+
 def test_terminal_items_from_closed_and_merged(
     snapshot: GitHubSnapshot, mock_client: MagicMock
 ) -> None:
@@ -253,3 +307,48 @@ def test_terminal_items_from_closed_and_merged(
 
     _items, world = snapshot.fetch("owner/repo")
     assert world.terminal_items == {"40", "41"}
+
+
+def test_pr_enrichment_failure_logs_warning_and_falls_back(
+    snapshot: GitHubSnapshot, mock_client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression test for the S110 fix (groomer-PR34): a failing per-PR detail
+    fetch must degrade gracefully (null mergeability preserved) AND surface a
+    warning in the logs — never a silent bare except-pass.
+    """
+    list_pr = {
+        "number": 98,
+        "title": "PR whose detail fetch fails",
+        "body": "",
+        "draft": False,
+        "mergeable": None,
+        "mergeable_state": None,
+        "labels": [],
+    }
+
+    mock_client.get.side_effect = [
+        _mock_response(200, []),               # open issues
+        _mock_response(200, [list_pr]),        # open PRs (list, mergeable=null)
+        _mock_response(200, []),               # closed issues
+        _mock_response(200, []),               # closed PRs
+        MagicMock(                              # per-PR detail GET — explodes
+            status_code=500,
+            json=lambda: (_ for _ in ()).throw(
+                RuntimeError("detail fetch exploded")
+            ),
+        ),
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        items, _world = snapshot.fetch("owner/repo")
+
+    pr = items[0]
+    assert pr.kind is ItemKind.PR
+    # Fallback preserved: list data (null mergeability) is what survives.
+    assert pr.mergeable is None
+    # The degradation is observable, not silently swallowed.
+    assert any(
+        "Per-PR mergeability enrichment failed" in record.getMessage()
+        and "owner/repo#98" in record.getMessage()
+        for record in caplog.records
+    )

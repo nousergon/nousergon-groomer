@@ -7,6 +7,7 @@ this module); no credentials are read here.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
 
@@ -15,6 +16,8 @@ from .models import Item, ItemKind, ItemState
 
 _ISSUE_REF = re.compile(r"#(\d+)")
 _API_BASE = "https://api.github.com"
+
+logger = logging.getLogger(__name__)
 
 
 class SnapshotError(Exception):
@@ -68,13 +71,14 @@ def _derive_pr_state(pr: dict[str, Any], ci_green: Optional[bool]) -> ItemState:
     if pr.get("draft"):
         return ItemState.OPEN_DRAFT
     mergeable = pr.get("mergeable")
-    if mergeable is False:
+    mergeable_state = pr.get("mergeable_state")
+    if mergeable is False or mergeable_state == "dirty":
         return ItemState.OPEN_DIRTY
     if ci_green is False:
         return ItemState.OPEN_RED_CI
     if ci_green is None:
         return ItemState.OPEN_PENDING_CI
-    if ci_green is True and mergeable is True:
+    if ci_green is True and (mergeable is True or mergeable_state == "clean"):
         return ItemState.OPEN_CLEAN_GREEN
     return ItemState.OPEN_PENDING_CI
 
@@ -135,6 +139,36 @@ class GitHubSnapshot:
             f"/repos/{repo}/issues", {"state": "closed"}
         )
         closed_prs_raw = self._get_paginated(f"/repos/{repo}/pulls", {"state": "closed"})
+
+        # Enrich PR list data with per-PR endpoint fields.
+        # GitHub's LIST /repos/{repo}/pulls endpoint does not compute mergeability
+        # (mergeable / mergeable_state are always null) and omits statusCheckRollup.
+        # The single GET /repos/{repo}/pulls/{number} endpoint returns both, so we
+        # re-fetch each PR individually when the list data is missing these fields
+        # (config#6168).
+        for pr in open_prs_raw:
+            if pr.get("mergeable") is None:
+                try:
+                    detail_resp = self._get_response(
+                        f"/repos/{repo}/pulls/{pr['number']}", None
+                    )
+                    detail = detail_resp.json()
+                    if not isinstance(detail, dict):
+                        continue
+                    pr["mergeable"] = detail.get("mergeable")
+                    pr["mergeable_state"] = detail.get("mergeable_state")
+                    if "statusCheckRollup" in detail:
+                        pr["statusCheckRollup"] = detail["statusCheckRollup"]
+                except Exception as exc:
+                    # Per-PR fetch is best-effort; fall back to (null) list data
+                    # and surface the degradation in the logs instead of
+                    # silently dropping the mergeability signal (S110).
+                    logger.warning(
+                        "Per-PR mergeability enrichment failed for %s#%s: %s",
+                        repo,
+                        pr["number"],
+                        exc,
+                    )
 
         open_issues = [issue for issue in open_issues_raw if "pull_request" not in issue]
         issues_with_open_pr = _issues_referenced_by_prs(open_prs_raw)
