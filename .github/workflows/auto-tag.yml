@@ -1,0 +1,76 @@
+name: Auto-tag from pyproject.toml version
+
+# Reads the version from pyproject.toml on every push-to-main and creates the
+# matching ``vX.Y.Z`` tag if it does not exist, then dispatches publish.yml
+# against that tag.
+#
+# Mirrors nousergon-lib's auto-tag.yml (the fleet's existing pattern) with one
+# necessary difference, and the difference is the whole point:
+#
+#   **A tag pushed with GITHUB_TOKEN does NOT trigger `on: push: tags`.**
+#
+# That is GitHub's workflow-loop prevention. nousergon-lib is unaffected because
+# its consumers `pip install git+...@vX.Y.Z` and only need the ref to exist.
+# This package is consumed from **PyPI** (`requirements-groom.txt` installs
+# `nousergon-groomer[all]` from the index), so the tag exists precisely to fire
+# publish.yml. Mirroring nousergon-lib verbatim would create tags that never
+# publish — a release pipeline that looks wired and is inert.
+#
+# So this workflow pushes the tag AND explicitly dispatches publish.yml.
+# A human-pushed tag still reaches publish.yml by the ordinary `push` path.
+#
+# Idempotent: no-ops when the tag already exists, so docs-only and CI-only
+# merges (no version change) do nothing here.
+#
+# Why the version bump is still by hand: nousergon-lib's merge-time autobump
+# needs a deploy key carrying an always-bypass on the branch-protection
+# ruleset. That is infrastructure this repo does not have yet and is tracked
+# separately — auto-tag is the half that needs no bypass, because creating a
+# tag is not a push to main.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: auto-tag-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # push the tag
+  actions: write    # dispatch publish.yml
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+
+      - name: Read version from pyproject.toml
+        id: ver
+        run: |
+          VERSION=$(python -c "import tomllib; print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version tag: v${VERSION}"
+
+      - name: Tag if missing, then dispatch publish
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git ls-remote --tags --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists on origin — no-op (docs/CI merge with no version change)."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "auto-tag from pyproject.toml on push-to-main"
+          git push origin "${TAG}"
+          echo "Pushed ${TAG} → $(git rev-parse HEAD)"
+          # The tag push above will NOT trigger publish.yml (GITHUB_TOKEN
+          # loop-prevention), so fire it explicitly against the new tag.
+          gh workflow run publish.yml --ref "${TAG}" -f ref="${TAG}"
+          echo "Dispatched publish.yml against ${TAG}"

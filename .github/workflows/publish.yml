@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  # Dispatched by auto-tag.yml. A tag pushed by GITHUB_TOKEN does NOT trigger
+  # `on: push: tags` (GitHub's workflow-loop prevention), so the auto-tag job
+  # cannot rely on the tag alone to reach PyPI — it calls this explicitly.
+  # A human-pushed tag still takes the `push` path above.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag to build and publish (e.g. v0.2.1)"
+        required: true
 
 permissions:
   id-token: write  # trusted publishing (OIDC)
