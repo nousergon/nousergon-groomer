@@ -10,7 +10,13 @@ import nousergon_groomer
 
 
 def test_package_imports():
-    assert nousergon_groomer.__version__ == "0.1.0"
+    # NOT a literal. Pinning the version to a hardcoded string here is what
+    # kept __init__.__version__ at 0.1.0 while pyproject.toml moved to 0.2.0
+    # and shipped: bumping __init__ would have failed this test, so nobody did.
+    # The equality that matters — __init__ == pyproject — lives in
+    # test_version_pin.py. This asserts only that a version is exposed.
+    assert isinstance(nousergon_groomer.__version__, str)
+    assert nousergon_groomer.__version__.count(".") >= 2
 
 
 def test_core_types_load():
