@@ -1,6 +1,7 @@
 """Contract tests for the GitHub snapshot adapter (issue #22)."""
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -306,3 +307,48 @@ def test_terminal_items_from_closed_and_merged(
 
     _items, world = snapshot.fetch("owner/repo")
     assert world.terminal_items == {"40", "41"}
+
+
+def test_pr_enrichment_failure_logs_warning_and_falls_back(
+    snapshot: GitHubSnapshot, mock_client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression test for the S110 fix (groomer-PR34): a failing per-PR detail
+    fetch must degrade gracefully (null mergeability preserved) AND surface a
+    warning in the logs — never a silent bare except-pass.
+    """
+    list_pr = {
+        "number": 98,
+        "title": "PR whose detail fetch fails",
+        "body": "",
+        "draft": False,
+        "mergeable": None,
+        "mergeable_state": None,
+        "labels": [],
+    }
+
+    mock_client.get.side_effect = [
+        _mock_response(200, []),               # open issues
+        _mock_response(200, [list_pr]),        # open PRs (list, mergeable=null)
+        _mock_response(200, []),               # closed issues
+        _mock_response(200, []),               # closed PRs
+        MagicMock(                              # per-PR detail GET — explodes
+            status_code=500,
+            json=lambda: (_ for _ in ()).throw(
+                RuntimeError("detail fetch exploded")
+            ),
+        ),
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        items, _world = snapshot.fetch("owner/repo")
+
+    pr = items[0]
+    assert pr.kind is ItemKind.PR
+    # Fallback preserved: list data (null mergeability) is what survives.
+    assert pr.mergeable is None
+    # The degradation is observable, not silently swallowed.
+    assert any(
+        "Per-PR mergeability enrichment failed" in record.getMessage()
+        and "owner/repo#98" in record.getMessage()
+        for record in caplog.records
+    )

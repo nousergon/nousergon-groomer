@@ -7,6 +7,7 @@ this module); no credentials are read here.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
 
@@ -15,6 +16,8 @@ from .models import Item, ItemKind, ItemState
 
 _ISSUE_REF = re.compile(r"#(\d+)")
 _API_BASE = "https://api.github.com"
+
+logger = logging.getLogger(__name__)
 
 
 class SnapshotError(Exception):
@@ -156,9 +159,16 @@ class GitHubSnapshot:
                     pr["mergeable_state"] = detail.get("mergeable_state")
                     if "statusCheckRollup" in detail:
                         pr["statusCheckRollup"] = detail["statusCheckRollup"]
-                except Exception:
-                    # Per-PR fetch is best-effort; fall back to (null) list data.
-                    pass
+                except Exception as exc:
+                    # Per-PR fetch is best-effort; fall back to (null) list data
+                    # and surface the degradation in the logs instead of
+                    # silently dropping the mergeability signal (S110).
+                    logger.warning(
+                        "Per-PR mergeability enrichment failed for %s#%s: %s",
+                        repo,
+                        pr["number"],
+                        exc,
+                    )
 
         open_issues = [issue for issue in open_issues_raw if "pull_request" not in issue]
         issues_with_open_pr = _issues_referenced_by_prs(open_prs_raw)
