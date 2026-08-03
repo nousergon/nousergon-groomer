@@ -238,6 +238,59 @@ def test_returned_items_are_valid(snapshot: GitHubSnapshot, mock_client: MagicMo
     assert pr.labels == ["groom-reviewed"]
 
 
+def test_pr_from_list_with_null_mergeable_enriched_by_detail_endpoint(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    """Regression test for config#6168: list endpoint mergeable=null → per-PR fetch → dirty.
+
+    GitHub's LIST endpoint returns ``mergeable: null`` for every PR.
+    The single-PR endpoint returns the real value (e.g. ``mergeable: False``
+    and ``mergeable_state: "dirty"`` for a conflicting PR).  After enrichment
+    the PR must land in OPEN_DIRTY so the conflict-resolution pass fires.
+    """
+    list_pr = {
+        "number": 99,
+        "title": "conflicting PR from list",
+        "body": "",
+        "draft": False,
+        "mergeable": None,
+        "mergeable_state": None,
+        "labels": [],
+    }
+    detail_pr = {
+        "number": 99,
+        "title": "conflicting PR detail",
+        "body": "",
+        "draft": False,
+        "mergeable": False,
+        "mergeable_state": "dirty",
+        "labels": [],
+    }
+
+    # Ordering matches the fetch() call sequence:
+    #   1. open issues (paginated)
+    #   2. open PRs (paginated)
+    #   3. closed issues (paginated)
+    #   4. closed PRs (paginated)
+    #   5+. per-PR detail GETs (one per PR with mergeable=None)
+    mock_client.get.side_effect = [
+        _mock_response(200, []),               # open issues
+        _mock_response(200, [list_pr]),         # open PRs (list, mergeable=null)
+        _mock_response(200, []),               # closed issues
+        _mock_response(200, []),               # closed PRs
+        _mock_response(200, detail_pr),         # per-PR detail GET
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    pr = items[0]
+    assert pr.kind is ItemKind.PR
+    assert pr.state is ItemState.OPEN_DIRTY, (
+        f"Expected OPEN_DIRTY for mergeable=False / mergeable_state=dirty, "
+        f"got {pr.state}"
+    )
+    assert pr.mergeable is False
+
+
 def test_terminal_items_from_closed_and_merged(
     snapshot: GitHubSnapshot, mock_client: MagicMock
 ) -> None:
