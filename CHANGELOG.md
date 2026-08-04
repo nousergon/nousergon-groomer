@@ -5,6 +5,43 @@ All notable changes to `nousergon-groomer` are recorded here. Versions follow
 
 While the major version is `0`, the public API may change between minor versions.
 
+## [0.10.0] — 2026-08-04
+
+### Added
+
+- **The §3.1 write-boundary chokepoint for raw dependency declarations**
+  (alpha-engine-config#6309). `Dependency.model_validate(raw)` /
+  `parse_dependency_declaration(raw)` parses a raw predicate string — as it
+  arrives from a `Verified-when:` body line or an issue custom field — into
+  a validated `Dependency`, or rejects it, at declaration, if it does not
+  parse into one of a closed allowlist of permitted subjects: `s3://bucket/key`,
+  `s3://bucket/prefix/`, `issue:owner/repo#N`, `pr:owner/repo#N`,
+  `pipeline_run:<id>`, an ISO-8601 date, or `milestone:<id>`. Typed
+  construction (`Dependency(kind=..., target=...)`) is unaffected.
+
+  The measured defect this closes: `alpha-engine-research-PR549` carried
+  prose in a `Verified-when` field that entered freely, because nothing
+  converted a raw predicate string into an evaluable `Dependency` before it
+  reached the tracker. Validating at evaluation time — the only alternative
+  — is what produces a population of unevaluable items with the author long
+  gone; this is now caught at authorship instead.
+
+- **`passes_agency_test(dep)`** — §3.5's agency test as an explicit,
+  independently callable function. Every `DependencyKind` today names a
+  condition genuinely outside the loop's own write authority (there is
+  deliberately no kind for branch, CI, review, label or draft state — see
+  `nousergon-groomer-PR39`), so `passes_agency_test` is always `True` for a
+  well-typed `Dependency` today. Its allowlist (`_AGENCY_EXTERNAL_KINDS`) is
+  a closed, explicit set rather than derived from `DependencyKind` itself,
+  so a future kind added to the enum without a matching, deliberate addition
+  here fails closed — `test_agency_allowlist_covers_every_dependency_kind`
+  pins today's equality and goes red the moment the two drift.
+
+  Wired into `Dependency` as a second, independent check (`§3.5`: "both
+  [evaluability and agency] are checked at declaration") guarding the typed
+  construction path against a future forbidden kind, on top of the raw-string
+  parser above, which can never produce one by construction.
+
 ## [0.9.0] — 2026-08-04
 
 ### Changed — BREAKING

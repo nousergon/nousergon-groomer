@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import datetime as _dt
 
+import pytest
+from pydantic import ValidationError
+
 from nousergon_groomer.dependency_evaluator import ObservedWorld
 from nousergon_groomer.dependency_graph import DependencyGraph
 from nousergon_groomer.disposition import (
@@ -36,6 +39,7 @@ from nousergon_groomer.models import (
     Item,
     ItemStage,
     VerificationObligation,
+    parse_dependency_declaration,
 )
 
 # ---------------------------------------------------------------------------
@@ -261,6 +265,39 @@ def test_conflicted_change_is_act_not_blocked():
     assert d.kind is DispositionKind.ACT
     assert d.action == "resolve_conflicts"
     assert d.kind is not DispositionKind.BLOCKED
+
+
+def test_agency_test_conflict_declaration_rejected_and_change_resolves_to_act():
+    """alpha-engine-config#6309's agency-test fixture, end to end.
+
+    Measured defect: of 53 open PRs carrying a blocked marker, 35 declared no
+    evaluable condition and 32 of those were merely conflicted or behind
+    ``main`` — the loop's own branch decay, declared as a blocker. This
+    asserts both halves of the fix in one scenario:
+
+    1. A raw declaration naming the change's own conflict/stale-branch state
+       ("branch is not behind main") is **rejected at the write boundary**
+       (§3.1 + §3.5) — it never becomes a ``declared_dependencies`` entry, so
+       it can never park the item as BLOCKED.
+    2. With no bogus dependency declared, the item's *real* observed
+       condition (``ChangeCondition.CONFLICTED``) is what the disposition
+       function reads, and it already resolves to ``ACT`` — the loop's own
+       write authority, never a blocker (§3.5).
+    """
+    with pytest.raises(ValidationError):
+        parse_dependency_declaration("branch is not behind main")
+    with pytest.raises(ValidationError):
+        parse_dependency_declaration("stale branch")
+
+    # No declared dependency reached the item — its condition is the only
+    # signal, exactly as §3.5 requires.
+    item = _pr(ChangeCondition.CONFLICTED, mergeable=False)
+    assert item.declared_dependencies == []
+    world = _world_full()
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.ACT
+    assert d.action == "resolve_conflicts"
 
 
 def test_draft_change_is_act():
