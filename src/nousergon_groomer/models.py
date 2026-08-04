@@ -84,6 +84,7 @@ class DependencyKind(str, enum.Enum):
     PR_TERMINAL = "pr_terminal"
     PIPELINE_RUN = "pipeline_run"
     DATE = "date"
+    MILESTONE_REACHED = "milestone_reached"
 
 
 class DispositionKind(str, enum.Enum):

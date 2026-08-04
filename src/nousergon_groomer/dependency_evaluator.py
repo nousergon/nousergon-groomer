@@ -42,6 +42,8 @@ class ObservedWorld(BaseModel):
     and ``pr_terminal`` dependencies. ``pipeline_runs`` is the set of pipeline
     run ids that completed successfully. ``today`` is the wall-clock date used
     to resolve ``date`` dependencies (target date has arrived).
+    ``reached_milestones`` is the set of milestone ids the harness has
+    observed reached; it backs ``milestone_reached`` dependencies.
 
     There is deliberately no label-based leaf condition here: a label is
     written BY the loop itself (§3.5), so "blocked until label X is
@@ -55,6 +57,7 @@ class ObservedWorld(BaseModel):
     terminal_items: Optional[set[str]] = None
     pipeline_runs: Optional[set[str]] = None
     today: Optional[_dt.date] = None
+    reached_milestones: Optional[set[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +139,18 @@ def evaluate_dependency(dep: Dependency, world: ObservedWorld) -> DependencyEval
         return DependencyEvaluation(
             dependency=dep, satisfied=arrived,
             reason="" if arrived else f"date {dep.target} not yet reached",
+        )
+
+    if kind is DependencyKind.MILESTONE_REACHED:
+        if world.reached_milestones is None:
+            return DependencyEvaluation(
+                dependency=dep, satisfied=False, undecidable=True,
+                reason="reached_milestones not reported",
+            )
+        reached = dep.target in world.reached_milestones
+        return DependencyEvaluation(
+            dependency=dep, satisfied=reached,
+            reason="" if reached else f"milestone {dep.target} not reached",
         )
 
     # Totality: an unknown kind is a programming error, not a default.
