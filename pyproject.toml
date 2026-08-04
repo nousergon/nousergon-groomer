@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-groomer"
-version = "0.4.0"
+version = "0.5.0"
 description = "Deterministic backlog groomer core: disposition function, dependency evaluator, admission controller, lane classifier. The fixture-runnable control plane for the autonomous backlog-and-PR maintenance loop."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -50,6 +50,9 @@ ignore = ["E501", "UP045"]  # UP045 (Optional→X|None) breaks pydantic v2 on py
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106"]
+# store_contract.py is a conformance SUITE shipped as package code so private
+# backends can run it (see its docstring). Its asserts are the deliverable.
+"src/nousergon_groomer/store_contract.py" = ["S101"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

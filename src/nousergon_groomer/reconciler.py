@@ -35,7 +35,7 @@ from .dependency_evaluator import ObservedWorld
 from .dependency_graph import DependencyGraph
 from .disposition import compute_disposition
 from .models import Disposition, DispositionKind, Item, ItemKind
-from .observed_gen import GenerationStore, record_evaluation, should_skip
+from .observed_gen import GenerationStoreProtocol, record_evaluation, should_skip
 
 __all__ = [
     "ReconcilerConfig",
@@ -178,7 +178,7 @@ class Reconciler:
         self,
         items: list[Item],
         world: ObservedWorld,
-        store: GenerationStore,
+        store: GenerationStoreProtocol,
     ) -> ReconcilerResult:
         """Run one reconciliation pass over ``items``.
 

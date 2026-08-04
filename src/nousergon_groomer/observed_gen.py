@@ -35,7 +35,8 @@ The store is **status**, kept separate from the spec (§3.3): it lives in
 from __future__ import annotations
 
 import hashlib
-from typing import Optional
+from collections.abc import Mapping
+from typing import Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -43,6 +44,8 @@ from .models import Disposition, Item, ObservedGeneration
 
 __all__ = [
     "GenerationStore",
+    "GenerationStoreProtocol",
+    "PersistentGenerationStore",
     "InputFingerprint",
     "should_skip",
     "record_evaluation",
@@ -124,21 +127,128 @@ def compute_fingerprint(
 
 
 # ---------------------------------------------------------------------------
+# The store interface — the substitutability seam (`principles.md` §2.8)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class GenerationStoreProtocol(Protocol):
+    """The store surface the **reconciler** depends on — and nothing more.
+
+    Declared as a :class:`typing.Protocol` rather than left implicit in the
+    concrete in-memory class so a persistent backend is written against a
+    stated contract instead of against another class's internals. Before this
+    existed the only way to write one was to subclass :class:`GenerationStore`
+    and populate its private ``_records`` dict — which makes a private
+    attribute of this module the de-facto extension point, and means any change
+    to it silently breaks a backend the core cannot see. Structural typing also
+    means a backend need not import or inherit anything from here to conform,
+    which is what "address the backend through an adapter, never an SDK client
+    at the call site" actually requires.
+
+    Deliberately narrow. The reconciler reads and writes per-item records; it
+    knows nothing about loading, flushing, bucket names or credentials. A
+    backend that needs those declares :class:`PersistentGenerationStore`
+    instead, which the *harness* depends on — the split keeps the core unable
+    to accidentally grow a dependency on persistence.
+
+    Use ``isinstance``, never ``issubclass``: a runtime-checkable protocol
+    carrying non-method members rejects ``issubclass`` by design.
+    """
+
+    def get(self, item_id: str) -> Optional[ObservedGeneration]:
+        """The last-recorded generation for ``item_id``, or ``None``.
+
+        ``None`` MUST mean "no record", never "unreadable". A backend that
+        cannot reach its storage raises; returning ``None`` there would make
+        every item read as new, which silently re-derives the whole fleet.
+        """
+        ...
+
+    def put(self, item_id: str, generation: ObservedGeneration) -> None:
+        """Record ``generation`` for ``item_id``, replacing any prior record."""
+        ...
+
+    def __contains__(self, item_id: str) -> bool: ...
+
+    def __len__(self) -> int: ...
+
+
+@runtime_checkable
+class PersistentGenerationStore(GenerationStoreProtocol, Protocol):
+    """A store that survives the process — the surface a **harness** needs.
+
+    The reconciler never sees this. A dispatcher does: it constructs the
+    backend, reports what was loaded, and flushes once at the end of a cycle.
+    Stating it here rather than leaving each harness to invent its own shape is
+    what keeps two harnesses (and a future SSM or DynamoDB backend) mutually
+    substitutable.
+
+    Implementations MUST satisfy:
+
+    - **Fail loud on an unreachable store.** Construction/load raises rather
+      than degrading to empty. An empty store means *every item is new*; a
+      cycle that proceeds on that re-derives the whole fleet and re-opens
+      disposed work. Only a *proven* absence (a 404 on a genuine first run) may
+      start empty.
+    - **Interruption leaves the store consistent** (§5.3). Interruption is the
+      normal case on spot. A reader must never observe a half-written store.
+    - **An idle cycle writes nothing.** :meth:`flush` returns ``False`` when
+      nothing was recorded, and MUST NOT touch the backing object — otherwise
+      the freshness signal reports health for a loop that did no work, which is
+      the §6.2 failure of rendering absence as green.
+    """
+
+    def flush(self, *, written_at: Optional[str] = None) -> bool:
+        """Persist the store. ``True`` iff something was actually written.
+
+        The return value is load-bearing, not informational: a cycle that
+        recorded dispositions and got ``False`` back has silently lost its
+        memory, and the caller is expected to fail loud on that.
+        """
+        ...
+
+    @property
+    def uri(self) -> str:
+        """Where this store lives, for logs and alarms (e.g. an ``s3://`` URI)."""
+        ...
+
+    @property
+    def loaded_count(self) -> int:
+        """How many records were read at construction.
+
+        Zero on a genuine first run. Reported so a store that quietly stopped
+        loading shows up as a step change rather than as a slow loss of skips.
+        """
+        ...
+
+    @property
+    def loaded_at(self) -> Optional[str]:
+        """When the loaded state was written, or ``None`` if nothing loaded."""
+        ...
+
+
+# ---------------------------------------------------------------------------
 # GenerationStore — the persisted status (§3.3 separation)
 # ---------------------------------------------------------------------------
 
 
 class GenerationStore:
-    """A per-item record of the last-evaluated input fingerprint (§5.5).
+    """The in-memory :class:`GenerationStoreProtocol` — the core's default.
 
     This is **status**, kept separate from the spec (§3.3): the store holds
     what was observed and evaluated, never what was declared. The store is
     in-memory by default; a persistent backend (S3/SSM) is the private
     harness's concern, not the core's.
+
+    It is deliberately **not** a :class:`PersistentGenerationStore`: it does not
+    survive the process, and claiming the persistent surface with a no-op
+    ``flush`` would let a harness wire the wrong store and see a green,
+    silent, amnesiac loop. A backend declares that protocol; this one does not.
     """
 
-    def __init__(self) -> None:
-        self._records: dict[str, ObservedGeneration] = {}
+    def __init__(self, records: Optional[Mapping[str, ObservedGeneration]] = None) -> None:
+        self._records: dict[str, ObservedGeneration] = dict(records or {})
 
     def get(self, item_id: str) -> Optional[ObservedGeneration]:
         """Return the last-recorded generation for ``item_id``, or None."""
@@ -153,6 +263,33 @@ class GenerationStore:
     def __len__(self) -> int:
         return len(self._records)
 
+    # -- extension points for a persistent backend -------------------------
+    #
+    # A backend subclassing this class needs to bulk-load what it read and to
+    # serialise what it holds. Both used to require reaching into ``_records``,
+    # which made a private attribute the real interface. These are that
+    # interface, stated.
+
+    def load_records(self, records: Mapping[str, ObservedGeneration]) -> None:
+        """Replace the store's contents wholesale with ``records``.
+
+        For a backend populating itself from durable storage at construction.
+        Deliberately a *replace*, not a merge: a load that merged into whatever
+        was already held could not distinguish "the object was empty" from
+        "the object failed to parse and we kept stale state", and it would not
+        go through :meth:`put`, whose override in a backend is what marks the
+        store dirty — loading is not a write, and must not schedule one.
+        """
+        self._records = dict(records)
+
+    def snapshot(self) -> dict[str, ObservedGeneration]:
+        """A copy of every record held, for serialisation.
+
+        A copy, so a backend cannot hand its live mapping to a serialiser and
+        have it mutate underneath.
+        """
+        return dict(self._records)
+
 
 # ---------------------------------------------------------------------------
 # Skip logic
@@ -161,7 +298,7 @@ class GenerationStore:
 
 def should_skip(
     item: Item,
-    store: GenerationStore,
+    store: GenerationStoreProtocol,
     *,
     head_sha: Optional[str] = None,
     body: Optional[str] = None,
@@ -250,7 +387,7 @@ def newly_satisfied(
 
 def record_evaluation(
     item: Item,
-    store: GenerationStore,
+    store: GenerationStoreProtocol,
     *,
     generation: int,
     head_sha: Optional[str] = None,
