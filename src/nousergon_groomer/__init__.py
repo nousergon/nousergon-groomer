@@ -36,7 +36,7 @@ from .github_executor import (
     ExecutorResult,
     GitHubExecutor,
 )
-from .github_snapshot import GitHubSnapshot, SnapshotError
+from .github_snapshot import GitHubSnapshot, IssueFieldConformance, SnapshotError
 from .model_provider import ModelError, ModelProvider, OpenAICompatibleProvider
 from .models import (
     Dependency,
@@ -76,6 +76,7 @@ __all__ = [
     "ExecutorResult",
     "GitHubExecutor",
     "GitHubSnapshot",
+    "IssueFieldConformance",
     "Item",
     "ItemKind",
     "ItemState",
@@ -90,4 +91,4 @@ __all__ = [
     "ReconcilerResult",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
