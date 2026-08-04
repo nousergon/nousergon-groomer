@@ -146,6 +146,11 @@ class DependencyKind(str, enum.Enum):
     ``issue_terminal`` / ``pr_terminal`` point at *other carried items* and
     are followed transitively by :mod:`dependency_graph` (§3.4). Every other
     kind is an external leaf condition resolved against :class:`ObservedWorld`.
+
+    ``human`` (§3.7, alpha-engine-config#6311) names a condition satisfiable
+    only by a named person acting — legal per §3.5's agency test (a person is
+    outside the loop's own write authority) and, per §3.7, never legal as a
+    bare label: the target always carries both the person and a due date.
     """
 
     S3_OBJECT = "s3_object"
@@ -155,6 +160,7 @@ class DependencyKind(str, enum.Enum):
     PIPELINE_RUN = "pipeline_run"
     DATE = "date"
     MILESTONE_REACHED = "milestone_reached"
+    HUMAN = "human"
 
 
 class DispositionKind(str, enum.Enum):
@@ -198,6 +204,13 @@ _PR_TERMINAL_RE = re.compile(r"^pr:(\S+/\S+#\d+)$")
 _PIPELINE_RUN_RE = re.compile(r"^pipeline_run:(\S+)$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MILESTONE_RE = re.compile(r"^milestone:(\S+)$")
+#: §3.7: a human dependency names the person AND a due date — never a bare
+#: name. The person is a GitHub handle (bare or ``@``-prefixed) or a plain
+#: name; the due date is the same ISO-8601 shape ``_DATE_RE`` already
+#: validates for DATE dependencies. ``target`` retains both halves, joined by
+#: the same ``:`` the other qualified kinds use, so :func:`human_owner` /
+#: :func:`human_due_date` can split it back out.
+_HUMAN_RE = re.compile(r"^human:(@?[\w.\-]+):(\d{4}-\d{2}-\d{2})$")
 
 
 def _parse_declaration_text(raw: str) -> dict[str, Any]:
@@ -239,14 +252,19 @@ def _parse_declaration_text(raw: str) -> dict[str, Any]:
     m = _MILESTONE_RE.match(text)
     if m:
         return {"kind": DependencyKind.MILESTONE_REACHED, "target": m.group(1)}
+    m = _HUMAN_RE.match(text)
+    if m:
+        return {"kind": DependencyKind.HUMAN, "target": f"{m.group(1)}:{m.group(2)}"}
     raise ValueError(
         f"dependency declaration {text!r} does not name a permitted subject "
         "(§3.1 + §3.5: only s3://bucket/key, s3://bucket/prefix/, "
         "issue:owner/repo#N, pr:owner/repo#N, pipeline_run:<id>, an "
-        "ISO-8601 date, or milestone:<id> parse into an evaluable, "
-        "externally-owned DependencyKind — branch, CI, review, label and "
-        "draft state are inside the loop's own write authority and are "
-        "never a dependency, so no pattern exists for them here)"
+        "ISO-8601 date, milestone:<id>, or human:<owner>:<YYYY-MM-DD> parse "
+        "into an evaluable, externally-owned DependencyKind — branch, CI, "
+        "review, label and draft state are inside the loop's own write "
+        "authority and are never a dependency, so no pattern exists for "
+        "them here; a human name with no due date is likewise rejected — "
+        "§3.7 requires both halves)"
     )
 
 
@@ -316,6 +334,35 @@ class Dependency(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_human_shape(self) -> Dependency:
+        """§3.7: a HUMAN dependency's target must split into a non-empty
+        owner and a real ISO-8601 due date — enforced here too (not only in
+        the raw-string parser above) so a *typed* construction
+        (``Dependency(kind=DependencyKind.HUMAN, target=...)``) gets the same
+        write-boundary guarantee rather than only the string-declaration
+        path. §3.6 forbids an open-ended wait; a due date that fails to parse
+        is the same defect as an absent one.
+        """
+        if self.kind is not DependencyKind.HUMAN:
+            return self
+        parts = self.target.split(":", 1)
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            raise ValueError(
+                f"HUMAN dependency target {self.target!r} must be "
+                "'<owner>:<YYYY-MM-DD>' — §3.7 requires both the person's "
+                "name and a due date, never a bare name"
+            )
+        owner, due = parts
+        try:
+            _dt.date.fromisoformat(due.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"HUMAN dependency due date {due!r} is not an ISO-8601 date "
+                f"(YYYY-MM-DD): {exc}"
+            ) from exc
+        return self
+
 
 def parse_dependency_declaration(raw: str) -> Dependency:
     """Parse a raw predicate string into a validated :class:`Dependency`.
@@ -362,6 +409,7 @@ _AGENCY_EXTERNAL_KINDS: frozenset[DependencyKind] = frozenset({
     DependencyKind.PIPELINE_RUN,
     DependencyKind.DATE,
     DependencyKind.MILESTONE_REACHED,
+    DependencyKind.HUMAN,
 })
 
 
@@ -388,6 +436,30 @@ def passes_agency_test(dep: Dependency) -> bool:
     ``declared_dependencies``.
     """
     return dep.kind in _AGENCY_EXTERNAL_KINDS
+
+
+def human_owner(dep: Dependency) -> str:
+    """The person named by a ``HUMAN`` dependency (§3.7).
+
+    Raises ``ValueError`` if ``dep.kind`` is not ``HUMAN`` — a caller asking
+    for the owner of a non-human dependency is a programming error, not a
+    missing value. ``Dependency``'s own ``_check_human_shape`` validator
+    already guarantees the split below succeeds for any constructed HUMAN
+    dependency, so this never re-raises the shape error.
+    """
+    if dep.kind is not DependencyKind.HUMAN:
+        raise ValueError(f"human_owner: {dep.kind.value!r} is not DependencyKind.HUMAN")
+    return dep.target.split(":", 1)[0]
+
+
+def human_due_date(dep: Dependency) -> str:
+    """The ISO-8601 due date named by a ``HUMAN`` dependency (§3.7 / §3.6).
+
+    See :func:`human_owner` for the error contract.
+    """
+    if dep.kind is not DependencyKind.HUMAN:
+        raise ValueError(f"human_due_date: {dep.kind.value!r} is not DependencyKind.HUMAN")
+    return dep.target.split(":", 1)[1]
 
 
 class Change(BaseModel):
