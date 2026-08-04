@@ -61,6 +61,14 @@ class ReconcilerConfig(BaseModel):
     wip_ceiling: int
     generation: int = 1  # the cycle counter (§5.5); monotonically increasing
 
+    #: ISO-8601 timestamp for this cycle, used to stamp dependencies observed
+    #: satisfied for the first time (§3.6). Supplied by the caller rather than
+    #: read from a clock so ``reconcile`` stays a pure function of its inputs
+    #: (§5.4) — the determinism tests would be the first thing a hidden clock
+    #: broke. ``None`` means the caller declined to date its observations, and
+    #: no satisfaction timestamps are recorded.
+    observed_at: Optional[str] = None
+
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -125,6 +133,28 @@ def _action_priority(action: Optional[str]) -> int:
     return _ACTION_PRIORITY.get(action, 50)
 
 
+def _recorded_disposition(recorded) -> Optional[Disposition]:
+    """Rebuild the disposition a skipped item last resolved to, or None.
+
+    Returns None when the record predates disposition storage, or when the
+    stored fields cannot form a valid :class:`Disposition` — ``ACT`` without an
+    action and ``UNDECIDABLE`` without a reason are both rejected at the model.
+    The caller must fall through and evaluate in that case: a skip that cannot
+    say what was decided is a hole, not an optimization, and silently emitting
+    a coerced verdict is the §5.1 failure the model's invariants exist to stop.
+    """
+    if recorded is None or recorded.disposition_kind is None:
+        return None
+    try:
+        return Disposition(
+            kind=DispositionKind(recorded.disposition_kind),
+            reason=recorded.disposition_reason,
+            action=recorded.disposition_action,
+        )
+    except (ValueError, TypeError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Reconciler
 # ---------------------------------------------------------------------------
@@ -160,16 +190,45 @@ class Reconciler:
         results: list[ItemDisposition] = []
 
         for item in items:
+            # The closure — not just the item's own declarations — is what the
+            # skip token is computed over (§3.4, §5.5). A blocked item's spec
+            # never changes; the world underneath it does, and a token blind to
+            # that would skip precisely the items that must be re-derived.
+            closure_state = graph.closure_state(item.id)
+
             skipped = should_skip(
-                item, store, current_generation=self._config.generation
+                item,
+                store,
+                closure_state=closure_state,
+                current_generation=self._config.generation,
             )
 
-            disposition = compute_disposition(item, graph, world)
+            if skipped:
+                # Reuse the recorded verdict rather than recomputing it. The
+                # skip is an optimization of the EVALUATION, never of the
+                # re-derivation obligation (§3.3): it is legal here only
+                # because the fingerprint proves every input is unchanged, so
+                # re-deriving is guaranteed to reach the same answer.
+                recorded = store.get(item.id)
+                disposition = _recorded_disposition(recorded)
+                if disposition is None:
+                    # A record with no disposition — written before the field
+                    # existed. Fall through and evaluate; a skip that cannot
+                    # say what was decided is not a skip, it is a hole.
+                    skipped = False
+                    disposition = compute_disposition(item, graph, world)
+            else:
+                disposition = compute_disposition(item, graph, world)
 
             # §5.5: record the evaluation fingerprint for this cycle. Even
             # skipped items get recorded so the next cycle can skip them too.
             record_evaluation(
-                item, store, generation=self._config.generation
+                item,
+                store,
+                generation=self._config.generation,
+                closure_state=closure_state,
+                disposition=disposition,
+                observed_at=self._config.observed_at,
             )
 
             # Admission gate: an ACT-create-PR disposition is downgraded to

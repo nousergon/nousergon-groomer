@@ -122,6 +122,59 @@ class DependencyGraph:
 
     # -- convenience -------------------------------------------------------
 
+    def closure_state(self, item_id: str) -> list[str]:
+        """Every dependency reachable from ``item_id``, with its observed state.
+
+        Each entry is ``"<kind>:<target>=<state>"`` where state is one of
+        ``satisfied`` / ``unsatisfied`` / ``undecidable``. Sorted, so the list
+        is a stable description of *what the world currently says* about this
+        item's whole transitive dependency closure.
+
+        **This is the input the §5.5 skip token was missing, and the omission
+        was unsound in exactly one direction.** ``Item.deps_hash`` covers the
+        dependencies an item *declares* — its spec. A blocked item's spec never
+        changes; what changes is the world underneath it. So a skip token built
+        from declarations alone would skip precisely the population that must
+        never be skipped: an item resting on a dependency that has since been
+        satisfied would keep its stale blocked disposition forever, because the
+        only thing that moved was a leaf two hops away (§3.4, §5.5).
+
+        Unlike :meth:`get_blocked_chain`, which returns the *first* blocking
+        chain and stops, this enumerates the **whole** closure — satisfied
+        dependencies included. A satisfied dependency reverting to unsatisfied
+        must also invalidate the token, and a walk that stopped at the first
+        blocker could not see it.
+
+        Raises :class:`DependencyCycleError` if traversal encounters a cycle.
+        """
+        if item_id not in self._items:
+            raise KeyError(f"unknown item id: {item_id!r}")
+        entries: set[str] = set()
+        self._walk_closure(item_id, path=(item_id,), out=entries)
+        return sorted(entries)
+
+    def _walk_closure(self, item_id: str, path: tuple, out: set[str]) -> None:
+        item = self._items[item_id]
+        for dep in item.declared_dependencies:
+            ev = evaluate_dependency(dep, self._world)
+            if ev.undecidable:
+                state = "undecidable"
+            elif ev.satisfied:
+                state = "satisfied"
+            else:
+                state = "unsatisfied"
+            out.add(f"{dep.kind.value}:{dep.target}={state}")
+            if dep.kind not in _ITEM_POINTING_KINDS:
+                continue
+            target = dep.target
+            if target in path:
+                raise DependencyCycleError(list(path) + [target])
+            if target in self._items:
+                # Followed whether or not this edge is satisfied: a satisfied
+                # item-pointing dependency can still have moving parts beneath
+                # it, and the token must invalidate when they move.
+                self._walk_closure(target, path + (target,), out)
+
     def blocked_items(self) -> list[str]:
         """Return the ids of all carried items that are transitively blocked."""
         return [item_id for item_id in self._items if self.is_transitively_blocked(item_id)]

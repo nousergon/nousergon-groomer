@@ -54,10 +54,13 @@ def test_first_evaluation_never_skips():
 # ---------------------------------------------------------------------------
 
 def test_unchanged_inputs_skip():
+    # An empty closure is an OBSERVATION ("this item reaches no dependencies"),
+    # which is a different thing from `None` ("the caller did not look"). Only
+    # the first may ground a skip — see test_no_closure_never_skips below.
     item = _item()
     store = GenerationStore()
-    record_evaluation(item, store, generation=1)
-    assert should_skip(item, store) is True
+    record_evaluation(item, store, generation=1, closure_state=[])
+    assert should_skip(item, store, closure_state=[]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +80,9 @@ def test_reordered_labels_skip():
     """Label order is irrelevant — the set hash is order-independent."""
     item = _item(labels=["a", "b"])
     store = GenerationStore()
-    record_evaluation(item, store, generation=1)
+    record_evaluation(item, store, generation=1, closure_state=[])
     item2 = _item(labels=["b", "a"])
-    assert should_skip(item2, store) is True
+    assert should_skip(item2, store, closure_state=[]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -125,8 +128,8 @@ def test_changed_head_sha_re_evaluates():
 def test_unchanged_head_sha_skips():
     item = _item()
     store = GenerationStore()
-    record_evaluation(item, store, generation=1, head_sha="sha1")
-    assert should_skip(item, store, head_sha="sha1") is True
+    record_evaluation(item, store, generation=1, head_sha="sha1", closure_state=[])
+    assert should_skip(item, store, head_sha="sha1", closure_state=[]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +146,8 @@ def test_changed_body_re_evaluates():
 def test_unchanged_body_skips():
     item = _item()
     store = GenerationStore()
-    record_evaluation(item, store, generation=1, body="hello")
-    assert should_skip(item, store, body="hello") is True
+    record_evaluation(item, store, generation=1, body="hello", closure_state=[])
+    assert should_skip(item, store, body="hello", closure_state=[]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +170,8 @@ def test_new_generation_skips_if_unchanged():
     """
     item = _item()
     store = GenerationStore()
-    record_evaluation(item, store, generation=5)
-    assert should_skip(item, store, current_generation=6) is True
+    record_evaluation(item, store, generation=5, closure_state=[])
+    assert should_skip(item, store, current_generation=6, closure_state=[]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +204,18 @@ def test_store_get_returns_none_for_unknown():
 
 def test_fingerprint_is_deterministic():
     item = _item(labels=["a", "b"], declared_dependencies=[_dep("s3://b/k")])
-    fp1 = compute_fingerprint(item)
-    fp2 = compute_fingerprint(item)
+    fp1 = compute_fingerprint(item, closure_state=["s3_object:s3://b/k=unsatisfied"])
+    fp2 = compute_fingerprint(item, closure_state=["s3_object:s3://b/k=unsatisfied"])
     assert fp1.matches(fp2)
+
+
+def test_no_closure_never_skips():
+    """A fingerprint with no closure describes inputs its writer could not
+    fully see — the world moves underneath a blocked item without touching
+    anything on the item itself (§3.4). Matching on it would grant exactly the
+    unsound skip the closure was added to prevent, so it never matches, not
+    even against another absent closure. Cost: one re-evaluation at upgrade."""
+    item = _item()
+    store = GenerationStore()
+    record_evaluation(item, store, generation=1)
+    assert should_skip(item, store) is False
