@@ -139,6 +139,30 @@ def test_date_rejects_malformed_target():
 
 
 # ---------------------------------------------------------------------------
+# MILESTONE_REACHED (issue #33)
+# ---------------------------------------------------------------------------
+
+def test_milestone_reached_satisfied_when_present():
+    dep = _dep(DependencyKind.MILESTONE_REACHED, "m0-contracts:reached")
+    world = ObservedWorld(reached_milestones={"m0-contracts:reached"})
+    assert evaluate_dependency(dep, world).satisfied is True
+
+
+def test_milestone_reached_unsatisfied_when_absent():
+    dep = _dep(DependencyKind.MILESTONE_REACHED, "m0-contracts:reached")
+    world = ObservedWorld(reached_milestones={"some-other-milestone"})
+    ev = evaluate_dependency(dep, world)
+    assert ev.satisfied is False
+    assert ev.undecidable is False
+
+
+def test_milestone_reached_undecidable_when_not_reported():
+    dep = _dep(DependencyKind.MILESTONE_REACHED, "m0-contracts:reached")
+    world = ObservedWorld(reached_milestones=None)
+    assert evaluate_dependency(dep, world).undecidable is True
+
+
+# ---------------------------------------------------------------------------
 # LABEL_ABSENT — removed (§3.5): a label is inside the loop's own write
 # authority, so a label-presence condition can never be a valid external
 # dependency. Kept as a negative test rather than deleted silently, so a

@@ -5,7 +5,14 @@ All notable changes to `nousergon-groomer` are recorded here. Versions follow
 
 While the major version is `0`, the public API may change between minor versions.
 
-## [Unreleased]
+## [0.8.0] — 2026-08-04
+
+### Added
+
+- **`DependencyKind.MILESTONE_REACHED`** (issue #33) — resolves a milestone id
+  against `ObservedWorld.reached_milestones: Optional[set[str]]`. Unblocks the
+  full migration of `gate:milestone` from label-based blocked-ness to a
+  derived `Dependency` (`alpha-engine-config#5877`, epic `#5871`).
 
 ### Removed
 
