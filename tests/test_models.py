@@ -488,6 +488,25 @@ def test_unrepresented_gate_labels_empty_for_a_non_gated_item():
     assert item.unrepresented_gate_labels == []
 
 
+# ---------------------------------------------------------------------------
+# Identity conflict (§5.6, alpha-engine-config#6316) — more than one open
+# change observed rendering the same item's in_flight stage
+# ---------------------------------------------------------------------------
+
+def test_has_identity_conflict_false_with_no_additional_refs():
+    item = Item(id="i1", stage=ItemStage.IN_FLIGHT, change_ref="100")
+    assert item.has_identity_conflict is False
+
+
+def test_has_identity_conflict_true_with_additional_refs():
+    item = Item(
+        id="i1", stage=ItemStage.IN_FLIGHT, change_ref="100",
+        additional_change_refs=["101"],
+    )
+    assert item.has_identity_conflict is True
+    assert item.additional_change_refs == ["101"]
+
+
 def test_has_gate_label_is_deprecated_and_reads_declared_dependencies():
     """The retired property no longer tests the label prefix.
 

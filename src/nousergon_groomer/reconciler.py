@@ -93,6 +93,14 @@ class ItemDisposition(BaseModel):
     skipped: bool = False  # §5.5: was this item skipped (inputs unchanged)?
     admission_reason: Optional[str] = None  # set when admission downgraded ACT
 
+    #: True iff this item declared more than one open in-flight change this
+    #: cycle (§5.6, alpha-engine-config#6316) — set whenever
+    #: ``Item.has_identity_conflict`` is true, regardless of what the item's
+    #: disposition resolved to (a terminal item keeps its TERMINAL
+    #: disposition per §5.6's own precedence, but the conflict is still
+    #: worth counting so it pages rather than resolving silently).
+    identity_conflict: bool = False
+
 
 class ReconcilerResult(BaseModel):
     """The output of one reconciler pass.
@@ -113,6 +121,13 @@ class ReconcilerResult(BaseModel):
     skipped: int
     admitted: int  # ACT-create-PR dispositions that passed admission
     admission_denied: int  # ACT-create-PR dispositions downgraded by admission
+
+    #: Count of items carrying more than one open in-flight change this cycle
+    #: (§5.6, alpha-engine-config#6316's §7 row). §7 forbids a blind counter
+    #: with no aggregate: any value above zero is the paging condition — the
+    #: identity invariant this reconciler asserts is not holding somewhere
+    #: upstream of it.
+    identity_conflicts: int = 0
 
     #: :class:`ItemStage` value → number of items at that effective stage this
     #: cycle. F6 is the share of the open population resting on a declared
@@ -252,6 +267,32 @@ class Reconciler:
             else:
                 disposition = compute_disposition(item, graph, world)
 
+            # §5.6 invariant — a terminal item's disposition never regresses
+            # (alpha-engine-config#6316). `compute_disposition` itself always
+            # returns TERMINAL for a terminal-stage item (its own step 3), so
+            # this can only fire via the SKIP path above: a record written
+            # while the item was still non-terminal, replayed after the item
+            # went terminal, because the §5.5 fingerprint has no component
+            # sensitive to `Item.stage` itself. Rather than trust a skip that
+            # cannot hold, fall through and re-derive fresh — the same
+            # "a skip that cannot say what was decided is a hole, not an
+            # optimization" rule already applied a few lines up for a
+            # disposition-less record. A fresh recompute that *still* isn't
+            # TERMINAL for a terminal-stage item is a `compute_disposition`
+            # regression, not a skip-staleness case, and is asserted loudly
+            # rather than papered over.
+            if item.stage.is_terminal and disposition.kind is not DispositionKind.TERMINAL:
+                skipped = False
+                disposition = compute_disposition(item, graph, world)
+                if disposition.kind is not DispositionKind.TERMINAL:
+                    raise RuntimeError(
+                        f"§5.6 invariant violated: item {item.id!r} is at terminal "
+                        f"stage {item.stage.value!r} but compute_disposition "
+                        f"returned {disposition.kind.value!r}, not TERMINAL — this "
+                        "should be unreachable (compute_disposition's own step 3 "
+                        "guarantees TERMINAL for every terminal-stage item)"
+                    )
+
             # §5.5: record the evaluation fingerprint for this cycle. Even
             # skipped items get recorded so the next cycle can skip them too.
             record_evaluation(
@@ -290,6 +331,7 @@ class Reconciler:
                     stage=stage,
                     skipped=skipped,
                     admission_reason=admission_reason,
+                    identity_conflict=item.has_identity_conflict,
                 )
             )
 
@@ -310,7 +352,7 @@ class Reconciler:
     ) -> ReconcilerResult:
         """Tally aggregate counts and assemble the result (§7)."""
         acted = blocked = terminal = undecidable = skipped = 0
-        admitted = admission_denied = 0
+        admitted = admission_denied = identity_conflicts = 0
         # Seeded with every stage at zero: a stage absent from the map and a
         # stage with no items are different claims, and only the second is
         # true. §6.2 — nothing emitted is unobserved, never healthy.
@@ -333,6 +375,8 @@ class Reconciler:
                 terminal += 1
             elif kind is DispositionKind.UNDECIDABLE:
                 undecidable += 1
+            if r.identity_conflict:
+                identity_conflicts += 1
 
         return ReconcilerResult(
             items=results,
@@ -345,6 +389,7 @@ class Reconciler:
             skipped=skipped,
             admitted=admitted,
             admission_denied=admission_denied,
+            identity_conflicts=identity_conflicts,
             stage_counts=stage_counts,
         )
 

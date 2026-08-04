@@ -30,15 +30,20 @@ Precedence (evaluated top-down, first match wins):
 2. **Excluded** (``do_not_groom``, §9 carve-out 2) → TERMINAL.
 3. **Terminal stage** (``done`` / ``abandoned``) → TERMINAL. Note that
    ``merged`` is *not* here: §3.8 gives it a successor stage and an obligation.
-4. **Undecidable dependency** (§3 honest degradation) → UNDECIDABLE, naming
+   Checked *before* the identity-conflict step below so a terminal item is
+   never displaced from TERMINAL by a stray duplicate-change observation
+   (§5.6's own invariant: a terminal item's disposition never regresses).
+4. **Identity conflict** (§5.6, alpha-engine-config#6316) → UNDECIDABLE,
+   naming the extra change refs. See :attr:`models.Item.additional_change_refs`.
+5. **Undecidable dependency** (§3 honest degradation) → UNDECIDABLE, naming
    the undecidable dependency. This is checked before stage-specific logic
    so a missing world observation is never silently coerced into an ACT or
    BLOCKED.
-5. **Unrepresented gate projection** (§3.3) → UNDECIDABLE, naming the labels.
+6. **Unrepresented gate projection** (§3.3) → UNDECIDABLE, naming the labels.
    An item carrying a ``gate:*`` label while declaring nothing has a status
    projection with no spec behind it; see
    :attr:`models.Item.unrepresented_gate_labels`.
-6. **Stage-specific** disposition, over the *effective* stage (see
+7. **Stage-specific** disposition, over the *effective* stage (see
    ``_STAGE_DISPATCH``).
 
 **No branch in this module reads a label as state** (``alpha-engine-config#6137``,
@@ -395,7 +400,29 @@ def compute_disposition(
     if item.stage.is_terminal:
         return _terminal(item, f"item is at terminal stage {item.stage.value}")
 
-    # 4. Undecidable dependency — honest degradation before stage logic.
+    # 4. Identity conflict (§5.6, alpha-engine-config#6316) — more than one
+    #    open change was observed rendering this item's in_flight stage. §3
+    #    says the intent-to-change relation is internal to one item and
+    #    therefore cannot be inconsistent; a non-empty
+    #    `additional_change_refs` means the substrate handed the adapter more
+    #    than one change for the same intent, which is exactly the identity
+    #    defect `duplicate_pr_sweep.py` used to catch from the outside, after
+    #    the fact, on a separate pass. Asserted here instead, at the totality
+    #    surface every item passes through: UNDECIDABLE keeps the item out of
+    #    every ACT path — including auto-merge — by construction, the same
+    #    shape as the unrepresented-gate-projection defect below.
+    if item.has_identity_conflict:
+        refs = ", ".join(item.additional_change_refs)
+        primary = item.change_ref or (item.change.ref if item.change else None)
+        return _undecidable(
+            f"more than one open change renders this item's in_flight stage "
+            f"(primary={primary!r}, additional={refs}) — a second in-flight "
+            "change for an item that already has one (§5.6): identity must "
+            "be resolved (close or re-target the duplicate) before this item "
+            "can be acted on"
+        )
+
+    # 5. Undecidable dependency — honest degradation before stage logic.
     #    Only evaluated for non-terminal items (terminal items are already
     #    dispatched above and never need their deps evaluated).
     evaluations = evaluate_item_dependencies(item, world)
@@ -408,7 +435,7 @@ def compute_disposition(
             f"undecidable dependency (world did not report the surface): {names}"
         )
 
-    # 5. Unrepresented gate projection (§3.3) — a gate:* label with no
+    # 6. Unrepresented gate projection (§3.3) — a gate:* label with no
     #    declaration behind it. Neither branch is derivable: treating the
     #    label as blocked asserts blocked-ness (what §3 abolishes), and
     #    treating it as unblocked is the 2026-07-22 auto-merge incident. The
@@ -423,7 +450,7 @@ def compute_disposition(
             "source of truth — declare the condition the gate names)"
         )
 
-    # 6. Stage-specific dispatch over the EFFECTIVE stage, not the recorded
+    # 7. Stage-specific dispatch over the EFFECTIVE stage, not the recorded
     #    one. A missing handler is a totality defect.
     stage = effective_stage(item, graph, world)
     handler = _STAGE_DISPATCH.get(stage)

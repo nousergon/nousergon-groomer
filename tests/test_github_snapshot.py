@@ -6,7 +6,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nousergon_groomer.github_snapshot import GitHubSnapshot, IssueFieldConformance, SnapshotError
+from nousergon_groomer.github_snapshot import (
+    GitHubSnapshot,
+    IssueFieldConformance,
+    SnapshotError,
+    _change_refs_by_issue,
+)
 from nousergon_groomer.models import (
     ChangeCondition,
     Dependency,
@@ -257,6 +262,64 @@ def test_issue_with_linked_open_pr_is_waiting(
     # population "waiting on review".
     assert issue.stage is ItemStage.IN_FLIGHT
     assert issue.change_ref == "22"
+
+
+def test_issue_with_two_open_prs_carries_the_identity_conflict(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    """§5.6, alpha-engine-config#6316: two open pull requests both closing
+    the same issue must not silently truncate to "first wins" — the extra
+    ref rides along in `Item.additional_change_refs` so the reconciler's
+    identity invariant can see and flag it, rather than the adapter
+    discarding the evidence the way it did before #6316.
+    """
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(21, title="Blocked issue")]),
+        _mock_response(200, [
+            _pr(22, body="Fixes #21"),
+            _pr(23, body="Also fixes #21"),
+        ]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),  # blocked_by for PR 22 — always probed
+        _mock_response(200, []),  # blocked_by for PR 23 — always probed
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    issue = next(item for item in items if not item.carries_change)
+    assert issue.stage is ItemStage.IN_FLIGHT
+    assert issue.change_ref == "22"
+    assert issue.additional_change_refs == ["23"]
+    assert issue.has_identity_conflict is True
+
+
+def test_change_refs_by_issue_returns_every_match_not_just_the_first() -> None:
+    """§5.6, alpha-engine-config#6316: pre-#6316 this truncated to the first
+    match with `dict.setdefault`, silently dropping evidence that a second
+    open PR also named the same issue. It must now return every match, in
+    encounter order, deduplicated.
+    """
+    prs = [
+        _pr(22, body="Fixes #21"),
+        _pr(23, body="Also fixes #21"),
+        _pr(24, body="Fixes #30"),
+    ]
+    refs = _change_refs_by_issue(prs)
+    assert refs == {21: ["22", "23"], 30: ["24"]}
+
+
+def test_change_refs_by_issue_single_match_unchanged() -> None:
+    """The ordinary, non-duplicated case: one ref per issue, as before."""
+    prs = [_pr(22, body="Fixes #21")]
+    assert _change_refs_by_issue(prs) == {21: ["22"]}
+
+
+def test_change_refs_by_issue_deduplicates_repeated_mentions_in_one_pr() -> None:
+    """The same PR mentioning the same issue twice in title+body is one ref,
+    not two — a PR cannot duplicate itself as a second in-flight change.
+    """
+    prs = [_pr(22, title="Fixes #21", body="See also #21")]
+    assert _change_refs_by_issue(prs) == {21: ["22"]}
 
 
 def test_api_404_raises_snapshot_error(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
