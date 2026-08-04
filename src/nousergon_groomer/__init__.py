@@ -49,6 +49,11 @@ from .models import (
     ItemState,
     ObservedGeneration,
 )
+from .observed_gen import (
+    GenerationStore,
+    GenerationStoreProtocol,
+    PersistentGenerationStore,
+)
 from .reconciler import Reconciler, ReconcilerConfig, ReconcilerResult
 
 __all__ = [
@@ -63,6 +68,9 @@ __all__ = [
     "DependencyKind",
     "Disposition",
     "DispositionKind",
+    "GenerationStore",
+    "GenerationStoreProtocol",
+    "PersistentGenerationStore",
     "ExecutorAbortError",
     "ExecutorError",
     "ExecutorResult",
@@ -82,4 +90,4 @@ __all__ = [
     "ReconcilerResult",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
