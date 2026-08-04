@@ -14,7 +14,7 @@ import enum
 import hashlib
 from typing import Optional
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -162,6 +162,63 @@ class ObservedGeneration(BaseModel):
     deps_hash: str
     head_sha: Optional[str] = None
     body_hash: Optional[str] = None
+
+    #: Hash of the item's whole transitive dependency closure, each edge
+    #: rendered with its **observed** state (see
+    #: :meth:`DependencyGraph.closure_state`).
+    #:
+    #: ``deps_hash`` above covers what the item *declares*; this covers what
+    #: the world currently *says* about everything it declares, transitively.
+    #: The distinction decides whether the skip is sound: a blocked item's own
+    #: declarations never change, so a token without this field would skip the
+    #: one population that must always be re-evaluated (§3.4, §5.5).
+    #:
+    #: ``None`` means the caller did not supply a closure — a record written
+    #: before this field existed, or a caller with no graph. A ``None`` on
+    #: either side forces re-evaluation rather than matching, so an upgrade
+    #: costs one non-skipped cycle and never a wrong skip.
+    closure_hash: Optional[str] = None
+
+    #: The disposition this item was last evaluated to, so a skipped item can
+    #: report what it resolved to rather than a hole. Without it, a live skip
+    #: would have to either recompute (defeating the skip) or emit nothing
+    #: (making a skipped item indistinguishable from an unprocessed one).
+    #:
+    #: All three fields are stored, not just the kind: :class:`Disposition`
+    #: enforces that ``ACT`` carries an action and ``UNDECIDABLE`` carries a
+    #: reason, so a record holding the kind alone cannot reconstruct a valid
+    #: one — it could only fabricate a placeholder that the model would reject
+    #: or, worse, accept as a different verdict.
+    disposition_kind: Optional[str] = None
+    disposition_reason: Optional[str] = None
+    disposition_action: Optional[str] = None
+
+    #: ``"<kind>:<target>"`` → ISO-8601 timestamp at which that dependency was
+    #: **first observed satisfied** (§3.6).
+    #:
+    #: This is the term §2.7 names as the one nothing records: F3's 24-hour
+    #: clock starts when an item becomes unblocked, and F7's detection latency
+    #: runs from dependency-satisfied to disposition. Neither is computable
+    #: from GitHub, because no surface stores the moment a condition flipped —
+    #: only the loop observing it can know, and only if it writes it down.
+    #:
+    #: Timestamps are **supplied by the caller**, never read from a clock in
+    #: here: the reconciler is required to be a pure function of
+    #: ``(config, items, world, store)`` (§5.4), and a hidden clock would make
+    #: two identical inputs produce different records.
+    dependency_satisfied_at: dict[str, str] = Field(default_factory=dict)
+
+    #: The ``"<kind>:<target>"`` tokens observed **satisfied** at this
+    #: evaluation. Kept so the next cycle can compute the *transition* rather
+    #: than the state.
+    #:
+    #: Without it the only available comparison is against
+    #: ``dependency_satisfied_at``'s keys, which cannot distinguish "satisfied
+    #: for the first time just now" from "satisfied for weeks but never
+    #: stamped because the first record predates this field". The second would
+    #: be dated to the cycle that happened to notice it, fabricating a latency
+    #: measurement instead of declining to make one.
+    satisfied_tokens: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
