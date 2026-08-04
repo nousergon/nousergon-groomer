@@ -11,14 +11,28 @@ Gate A checks (all must pass; an undecidable observation fails the check —
 we never auto-merge what we cannot confirm clean):
 
 1. ``not_draft``      — the PR is not a draft.
-2. ``no_gate_label``  — the PR carries no ``gate:*`` label (gated PRs are
-   not auto-merge candidates; they require their gate to clear).
+2. ``no_open_dependency`` — every dependency the PR **declares** is observed
+   satisfied, and it carries no ``gate:*`` projection that nothing declares.
 3. ``mergeable_clean`` — GitHub reports ``mergeable == True``.
 4. ``ci_green``       — CI is reported green.
 5. ``no_security_threads`` — the PR has zero open security review threads.
 
 Gate B lane match: exactly one of the lane labels must be present. Zero or
 multiple lane labels means the PR is not eligible (no lane to run).
+
+Check 2 replaces the ``no_gate_label`` label test retired by
+``alpha-engine-config#6137`` (parent ``nous-ergon-ops#356``). It is derived,
+so a **cleared** gate stops blocking auto-merge the moment the world says so
+rather than when someone edits a label, and an **uncleared** one blocks on the
+condition it actually names. It is also deliberately redundant with
+:func:`disposition.compute_disposition`'s chain check: groom-sweep-policy §3.3
+names a single upstream check owning the gate exclusion as the shape that
+produced the 2026-07-22 incident, so this module re-derives rather than
+assuming the caller already did.
+
+``world`` is optional only so a caller can ask the label-and-field questions
+without an observation. Without it, an item that declares dependencies fails
+check 2 — unconfirmed is not clean.
 """
 from __future__ import annotations
 
@@ -27,6 +41,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from .dependency_evaluator import ObservedWorld, evaluate_item_dependencies
 from .models import Item, ItemKind
 
 # ---------------------------------------------------------------------------
@@ -70,25 +85,66 @@ class GateAResult(BaseModel):
     """
 
     not_draft: bool
-    no_gate_label: bool
+    no_open_dependency: bool
     mergeable_clean: bool
     ci_green: bool
     no_security_threads: bool
     passed: bool
     failed_checks: list[str]
+    #: Why ``no_open_dependency`` failed, when it did — the unsatisfied or
+    #: undecidable declarations, or the unbacked ``gate:*`` projection. Empty
+    #: when the check passed. Kept so a blocked auto-merge names its condition
+    #: rather than only the check that rejected it.
+    open_dependency_reasons: list[str] = []
 
 
-def _evaluate_gate_a(item: Item) -> GateAResult:
+def _evaluate_open_dependencies(
+    item: Item, world: Optional[ObservedWorld]
+) -> tuple[bool, list[str]]:
+    """Derive Gate A check 2: is this PR under any unsatisfied condition?
+
+    Returns ``(passed, reasons)``. Fails when the item carries a ``gate:*``
+    projection nothing declares (§3.3 — unbacked, undecidable in both
+    directions), or when any declared dependency is unsatisfied, undecidable,
+    or simply cannot be evaluated because no ``world`` was supplied.
+    """
+    unrepresented = item.unrepresented_gate_labels
+    if unrepresented:
+        return False, [
+            f"gate label {label} projects a status no declared dependency backs"
+            for label in unrepresented
+        ]
+
+    if not item.declared_dependencies:
+        return True, []
+
+    if world is None:
+        return False, [
+            f"{len(item.declared_dependencies)} declared dependency/ies and no "
+            "observed world to evaluate them against (unconfirmed is not clean)"
+        ]
+
+    reasons: list[str] = []
+    for ev in evaluate_item_dependencies(item, world):
+        if ev.satisfied and not ev.undecidable:
+            continue
+        token = f"{ev.dependency.kind.value}:{ev.dependency.target}"
+        state = "undecidable" if ev.undecidable else "unsatisfied"
+        reasons.append(f"{token} {state}" + (f" ({ev.reason})" if ev.reason else ""))
+    return (not reasons), reasons
+
+
+def _evaluate_gate_a(item: Item, world: Optional[ObservedWorld] = None) -> GateAResult:
     """Run the five Gate A checks against ``item``.
 
-    An undecidable observation (``mergeable is None`` or ``ci_green is None``)
-    fails the corresponding check — auto-merge requires positive confirmation
-    of cleanliness, never absence of evidence.
+    An undecidable observation (``mergeable is None``, ``ci_green is None``, an
+    unevaluable declared dependency) fails the corresponding check — auto-merge
+    requires positive confirmation of cleanliness, never absence of evidence.
     """
     not_draft = (not item.is_draft) and (
         item.state.value != "draft" if hasattr(item.state, "value") else True
     )
-    no_gate_label = not item.has_gate_label
+    no_open_dependency, open_dependency_reasons = _evaluate_open_dependencies(item, world)
     mergeable_clean = item.mergeable is True
     ci_green = item.ci_green is True
     no_security_threads = item.security_threads == 0
@@ -96,8 +152,8 @@ def _evaluate_gate_a(item: Item) -> GateAResult:
     failed: list[str] = []
     if not not_draft:
         failed.append("not_draft")
-    if not no_gate_label:
-        failed.append("no_gate_label")
+    if not no_open_dependency:
+        failed.append("no_open_dependency")
     if not mergeable_clean:
         failed.append("mergeable_clean")
     if not ci_green:
@@ -107,12 +163,13 @@ def _evaluate_gate_a(item: Item) -> GateAResult:
 
     return GateAResult(
         not_draft=not_draft,
-        no_gate_label=no_gate_label,
+        no_open_dependency=no_open_dependency,
         mergeable_clean=mergeable_clean,
         ci_green=ci_green,
         no_security_threads=no_security_threads,
         passed=(not failed),
         failed_checks=failed,
+        open_dependency_reasons=open_dependency_reasons,
     )
 
 
@@ -159,8 +216,15 @@ class LaneClassification(BaseModel):
     reason: str
 
 
-def classify_lane(item: Item) -> LaneClassification:
+def classify_lane(
+    item: Item, world: Optional[ObservedWorld] = None
+) -> LaneClassification:
     """Classify ``item`` for auto-merge: Gate A first, then Gate B (exactly one lane).
+
+    ``world`` is the observed snapshot Gate A check 2 evaluates the item's
+    declared dependencies against. Omitting it is legal but conservative: an
+    item declaring any dependency then fails check 2, because auto-merge
+    requires positive confirmation and no observation was supplied.
 
     Non-PR items are never eligible; this is reported with a populated (but
     trivially-failing) Gate A so the caller sees a consistent shape.
@@ -169,7 +233,7 @@ def classify_lane(item: Item) -> LaneClassification:
     if item.kind is not ItemKind.PR:
         gate_a = GateAResult(
             not_draft=False,
-            no_gate_label=False,
+            no_open_dependency=False,
             mergeable_clean=False,
             ci_green=False,
             no_security_threads=False,
@@ -184,13 +248,18 @@ def classify_lane(item: Item) -> LaneClassification:
         )
 
     # Gate A.
-    gate_a = _evaluate_gate_a(item)
+    gate_a = _evaluate_gate_a(item, world)
     if not gate_a.passed:
+        detail = (
+            f" ({'; '.join(gate_a.open_dependency_reasons)})"
+            if gate_a.open_dependency_reasons
+            else ""
+        )
         return LaneClassification(
             eligible=False,
             gate_a=gate_a,
             lane=None,
-            reason=f"gate A failed: {', '.join(gate_a.failed_checks)}",
+            reason=f"gate A failed: {', '.join(gate_a.failed_checks)}{detail}",
         )
 
     # Gate B: exactly one lane.

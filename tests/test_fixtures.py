@@ -61,6 +61,7 @@ def test_fixtures_cover_core_scenarios(fixture_names):
         "transitive_blocked",
         "at_wip_ceiling",
         "gate_labeled_pr",
+        "gate_derived_dependency",
         "do_not_groom",
         "undecidable",
     }

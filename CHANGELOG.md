@@ -88,6 +88,130 @@ While the major version is `0`, the public API may change between minor versions
   silent, amnesiac loop — one reporting *more* work done each cycle, not less.
 - Fully backward compatible: no existing signature, name or behaviour changed.
 
+## [0.6.0] — 2026-08-04
+
+### Changed
+
+- **No branch in the core reads a `gate:*` label as state** (`alpha-engine-config#6137`,
+  parent `nous-ergon-ops#356` — Brian ruled the taxonomy retired as a state
+  representation on 2026-07-31; groom-sweep-policy §3.3). Gate-ness now reaches
+  a disposition exactly one way: the harness translates a gate into declared
+  dependencies, the observer reports the surfaces they name, and the evaluator
+  decides.
+
+  - `disposition._disposition_open_draft` no longer returns TERMINAL for a draft
+    carrying a `gate:*` label. A draft whose declared conditions are satisfied is
+    ACT `advance_draft`, even with the label still attached; one whose conditions
+    are not is BLOCKED naming **the condition** — an S3 key, a pipeline run, a
+    blocking item — instead of the label that hid it. This is the property the
+    migration was for: a cleared gate stops blocking when the world says so, not
+    when someone edits a label.
+  - `lane_classifier` Gate A check 2 is renamed `no_gate_label` →
+    `no_open_dependency` and is now derived: it fails on an unbacked `gate:*`
+    projection, on any declared dependency observed unsatisfied or undecidable,
+    and on declared dependencies with no `world` to evaluate them against.
+    `classify_lane` takes an optional `world`; `GateAResult` gains
+    `open_dependency_reasons` so a rejected auto-merge names its condition.
+    The check is deliberately redundant with the disposition function's chain
+    check — §3.3 names a *single* upstream check owning the gate exclusion as
+    the shape that produced the 2026-07-22 incident (six gated, CI-red PRs
+    auto-merged in minutes), so both surfaces derive independently.
+
+- **An unbacked gate projection is UNDECIDABLE, at the top of the disposition
+  function.** `Item.unrepresented_gate_labels` names the `gate:*` labels on an
+  item that declares nothing at all; a non-empty list short-circuits every
+  state handler. Neither branch is derivable — reading the label as blocked
+  asserts blocked-ness (what §3 abolishes), and reading it as clear is the
+  2026-07-22 incident — so the core declines and surfaces it. This also makes
+  true a promise the private harness already prints: an item whose enrichment
+  failed is "left without derived dependencies (will surface as undecidable,
+  not silently unblocked)".
+
+### Deprecated
+
+- **`Item.has_gate_label`** now reads declared dependencies rather than the
+  label prefix, and warns. Nothing in this package calls it. Its value is
+  `has_declared_dependency or unrepresented_gate_labels`, which is identical to
+  the retired label test for a freshly snapshotted item and stays true once that
+  item is enriched — so a harness using it to *select* which items to fetch
+  declarations for (an observation use) is unaffected, while a harness using it
+  as *state* now gets a warning pointing at `Item.has_declared_dependency`,
+  `Item.unrepresented_gate_labels`, or `dependency_evaluator.is_item_blocked`.
+- **`config.GateFamily`** is deprecated as a state surface. No logic reads it;
+  it is retained only so a deployed YAML config still loads unchanged.
+
+### Added
+
+- `Item.has_declared_dependency`, `Item.unrepresented_gate_labels`, and the
+  `models.GATE_LABEL_PREFIX` constant.
+- Fixture `gate_derived_dependency` — the migrated gated population: a cleared
+  gate auto-merging with its stale label still attached, an uncleared one
+  blocking on the S3 key it actually names, and a draft the loop advances
+  rather than resting on. Fixture `gate_labeled_pr` now records the unbacked
+  projection case (UNDECIDABLE), stated against the worst case: the PR is
+  green, mergeable and carries an auto-merge lane label.
+
+## [0.5.0] — 2026-08-04
+
+### Added
+
+- **`GenerationStoreProtocol` and `PersistentGenerationStore` — the store is
+  now an interface, not a class.** `Reconciler.reconcile`, `should_skip` and
+  `record_evaluation` are typed against the narrow protocol; the persistent
+  surface a harness needs (`flush`, `uri`, `loaded_count`, `loaded_at`) is a
+  separate protocol the core never depends on.
+
+  **Why this is a correctness concern and not tidiness.** The module docstring
+  has always said a persistent backend is "the private harness's concern", but
+  the only way to write one was to subclass `GenerationStore` and populate its
+  private `_records` dict — which made a private attribute the real extension
+  point. A backend built that way is coupled to an internal the core is free to
+  change and cannot see, and it is coupled *silently*: the failure mode is not
+  an import error, it is a store that loads nothing and skips nothing while
+  every surface stays green. `principles.md` §2.8 asks that a swappable
+  component be addressed through a declared adapter; this is that declaration.
+
+  Conformance is **structural**, so a backend need not import or inherit
+  anything from this package to satisfy it. Use `isinstance`, never
+  `issubclass` — a runtime-checkable protocol with non-method members rejects
+  the latter by design.
+
+- **`GenerationStore.load_records()` and `.snapshot()`** — the two operations a
+  backend actually needs (bulk-load what was read, serialise what is held),
+  stated as public API. `load_records` **replaces** rather than merges, and
+  deliberately does not route through `put`: loading is not a write and must
+  not mark a store dirty, or a cycle that recorded nothing would still refresh
+  the object and report freshness for a loop that did no work.
+  `GenerationStore(records=...)` accepts an initial mapping.
+
+- **`nousergon_groomer.store_contract` — a conformance suite shipped as package
+  code.** `GenerationStoreContract` is a subclassable set of assertions with a
+  `make_store` factory and a `reopen` hook; a private backend runs it in its own
+  CI against its own fake client. It asserts every field round-trips, that an
+  unchanged cycle skips every item, that a **changed transitive leaf forces
+  re-evaluation of a dependent item whose own fields did not change**, and that
+  a first-observed-satisfied timestamp (§3.6) is taken once and never
+  overwritten.
+
+  It ships in `src/` rather than `tests/` on purpose: the stores whose failure
+  costs anything are the private ones, and a suite that only ran here would be
+  testing the single backend where a wrong skip is free. It imports no test
+  framework — plain asserts in plain methods, collected by pytest when
+  subclassed.
+
+  `tests/test_store_contract.py` runs it twice against the in-memory store,
+  once with `reopen` as identity and once forcing every record through a JSON
+  round-trip — without the second, the suite could not tell a store that
+  persists correctly from one that never persists at all.
+
+### Notes
+
+- `GenerationStore` deliberately does **not** satisfy `PersistentGenerationStore`,
+  and a test asserts the negative. Giving the in-memory default a no-op `flush`
+  returning success would let a harness wire the wrong store and watch a green,
+  silent, amnesiac loop — one reporting *more* work done each cycle, not less.
+- Fully backward compatible: no existing signature, name or behaviour changed.
+
 ## [0.4.0] — 2026-08-04
 
 ### Changed

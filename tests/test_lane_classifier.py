@@ -1,8 +1,19 @@
 """Contract tests for the lane classifier (issue #11)."""
 from __future__ import annotations
 
+from nousergon_groomer.dependency_evaluator import ObservedWorld
 from nousergon_groomer.lane_classifier import MergeLane, classify_lane
-from nousergon_groomer.models import Item, ItemKind, ItemState
+from nousergon_groomer.models import Dependency, DependencyKind, Item, ItemKind, ItemState
+
+
+def _world(**kw) -> ObservedWorld:
+    """A fully-reported world, overridable per surface."""
+    defaults = {
+        "s3_objects": set(), "s3_prefixes": set(), "terminal_items": set(),
+        "pipeline_runs": set(),
+    }
+    defaults.update(kw)
+    return ObservedWorld(**defaults)
 
 
 def _pr(state=ItemState.OPEN_CLEAN_GREEN, **kw):
@@ -60,11 +71,59 @@ def test_draft_fails_gate_a():
     assert "not_draft" in result.gate_a.failed_checks
 
 
-def test_gate_label_fails_gate_a():
+def test_unbacked_gate_label_fails_gate_a():
+    """A gate:* projection with nothing declared behind it is not confirmable."""
     item = _pr(mergeable=True, ci_green=True, labels=["groom-reviewed", "gate:weekly-sf"])
+    result = classify_lane(item, _world())
+    assert result.eligible is False
+    assert "no_open_dependency" in result.gate_a.failed_checks
+    assert any("gate:weekly-sf" in r for r in result.gate_a.open_dependency_reasons)
+
+
+def test_unsatisfied_declared_dependency_fails_gate_a():
+    """Gate A re-derives rather than assuming the caller checked the chain.
+
+    groom-sweep-policy §3.3 names a single upstream check owning the gate
+    exclusion as the 2026-07-22 shape; this is the second, independent derivation.
+    """
+    dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/weekly.json")
+    item = _pr(mergeable=True, ci_green=True, labels=["groom-reviewed"],
+               declared_dependencies=[dep])
+    result = classify_lane(item, _world())
+    assert result.eligible is False
+    assert "no_open_dependency" in result.gate_a.failed_checks
+    assert any("s3://b/weekly.json" in r for r in result.gate_a.open_dependency_reasons)
+
+
+def test_satisfied_declared_dependency_passes_gate_a():
+    """A cleared gate no longer blocks the lane — even with the label attached."""
+    dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/weekly.json")
+    item = _pr(mergeable=True, ci_green=True,
+               labels=["groom-reviewed", "gate:weekly-sf"],
+               declared_dependencies=[dep])
+    result = classify_lane(item, _world(s3_objects={"s3://b/weekly.json"}))
+    assert result.eligible is True
+    assert result.lane is MergeLane.GROOM_REVIEWED
+
+
+def test_undecidable_declared_dependency_fails_gate_a():
+    """Unobserved is not satisfied — never auto-merge what we cannot confirm."""
+    dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/weekly.json")
+    item = _pr(mergeable=True, ci_green=True, labels=["groom-reviewed"],
+               declared_dependencies=[dep])
+    result = classify_lane(item, ObservedWorld())  # nothing reported
+    assert result.eligible is False
+    assert "no_open_dependency" in result.gate_a.failed_checks
+
+
+def test_declared_dependency_without_a_world_fails_gate_a():
+    """Omitting the world is legal and conservative, never permissive."""
+    dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/weekly.json")
+    item = _pr(mergeable=True, ci_green=True, labels=["groom-reviewed"],
+               declared_dependencies=[dep])
     result = classify_lane(item)
     assert result.eligible is False
-    assert "no_gate_label" in result.gate_a.failed_checks
+    assert "no_open_dependency" in result.gate_a.failed_checks
 
 
 def test_not_mergeable_fails_gate_a():

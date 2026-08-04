@@ -29,6 +29,15 @@ class LaneConfig(BaseModel):
 
 
 class GateFamily(BaseModel):
+    """DEPRECATED as a state surface (``alpha-engine-config#6137``).
+
+    No logic in this package reads it. Gate families are a *label grammar*
+    (``policy-gate-taxonomy``) projecting status for human readers; blocked-ness
+    is derived from declared dependencies (groom-sweep-policy §3). The field is
+    retained so an existing deployed YAML config still loads unchanged, and is
+    scheduled for removal once no fleet config declares it.
+    """
+
     prefix: str
     families: list[str]
 
