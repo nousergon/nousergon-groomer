@@ -2,13 +2,19 @@
 
 This is the §8.1 proof: the entire suite runs over JSON fixtures with no
 network, no credentials, no model. Each fixture records an item population,
-an observed world, an optional config, and the expected dispositions. This
-test asserts the reconciler produces the expected disposition for every item
-in every fixture.
+an observed world, an optional config, and the expected dispositions **and
+stages**. This test asserts the reconciler produces both for every item in
+every fixture.
+
+Asserting the stage is not decoration. Two of the six forward stages are
+derived rather than stored, so nothing outside this suite can catch a
+derivation that silently changes — and F7 and F6 are computed from stage-entry
+timestamps, which means a wrong stage is a wrong number on the surface rather
+than a visible failure.
 """
 from __future__ import annotations
 
-from nousergon_groomer.models import DispositionKind
+from nousergon_groomer.models import DispositionKind, ItemStage
 from nousergon_groomer.observed_gen import GenerationStore
 from nousergon_groomer.reconciler import Reconciler
 
@@ -38,6 +44,52 @@ def test_fixture_dispositions_match_expected(
                 f"item {item_id}: expected action {expected['action']}, "
                 f"got {actual.action}"
             )
+        if "stage" in expected:
+            assert item_result.stage is ItemStage(expected["stage"]), (
+                f"item {item_id}: expected effective stage {expected['stage']}, "
+                f"got {item_result.stage.value}"
+            )
+
+
+def test_every_fixture_item_declares_its_expected_stage(fixture_scenario, fixture_expected):
+    """Every fixture asserts the stage, not only the disposition (§8.1).
+
+    The binding constraint on the stage model is that *every stage transition
+    is assertable against recorded fixtures*. A fixture that pins the verdict
+    and leaves the stage free would pass while the derivation that produced it
+    drifted.
+    """
+    missing = sorted(k for k, v in fixture_expected.items() if "stage" not in v)
+    assert not missing, (
+        f"fixture {fixture_scenario.get('description', '?')!r}: items {missing} "
+        "declare an expected disposition with no expected stage"
+    )
+
+
+def test_fixture_stage_entry_timestamps_are_recorded(
+    fixture_items, fixture_world, fixture_config, fixture_expected
+):
+    """Deliverable 4: F6 and F7 are computed from the store's stamps alone.
+
+    Every item the reconciler dispositions gets its effective stage stamped in
+    the §1.2 store. Without this the two outcome numbers are not merely
+    approximate — they are uncomputable, because no other surface records when
+    an item entered a *derived* stage.
+    """
+    store = GenerationStore()
+    config = fixture_config.model_copy(update={"observed_at": "2026-08-04T12:00:00+00:00"})
+    result = Reconciler(config).reconcile(fixture_items, fixture_world, store)
+
+    for item_result in result.items:
+        record = store.get(item_result.item_id)
+        assert record is not None, f"no store record for {item_result.item_id}"
+        assert record.stage == item_result.stage.value
+        assert record.stage_entered_at.get(item_result.stage.value) == (
+            "2026-08-04T12:00:00+00:00"
+        ), (
+            f"item {item_result.item_id} at stage {item_result.stage.value} has no "
+            f"entry timestamp: {record.stage_entered_at}"
+        )
 
 
 def test_all_fixtures_have_at_least_one_item(fixture_scenario, fixture_items):
@@ -64,6 +116,11 @@ def test_fixtures_cover_core_scenarios(fixture_names):
         "gate_derived_dependency",
         "do_not_groom",
         "undecidable",
+        # alpha-engine-config#6307 — the stage model's two closes-when cases
+        # plus the one-unit-two-records shape the substrate forces.
+        "conflicted_change_is_work",
+        "merged_is_not_terminal",
+        "one_item_two_records",
     }
     missing = required - set(fixture_names)
     assert not missing, f"missing required fixtures: {missing}"

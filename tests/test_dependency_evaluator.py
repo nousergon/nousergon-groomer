@@ -11,7 +11,7 @@ from nousergon_groomer.dependency_evaluator import (
     evaluate_item_dependencies,
     is_item_blocked,
 )
-from nousergon_groomer.models import Dependency, DependencyKind, Item, ItemKind, ItemState
+from nousergon_groomer.models import Dependency, DependencyKind, Item, ItemStage
 
 _LABEL_ABSENT_VALUE = "label_absent"
 
@@ -22,7 +22,7 @@ def _dep(kind: DependencyKind, target: str) -> Dependency:
 
 def _item(deps=None) -> Item:
     return Item(
-        id="i1", kind=ItemKind.ISSUE, state=ItemState.OPEN_ISSUE_ACTIONABLE,
+        id="i1", stage=ItemStage.PROPOSED,
         declared_dependencies=deps or [],
     )
 

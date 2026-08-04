@@ -44,14 +44,15 @@ harness (dispatch, merge execution, PAT) lives in the private layer.
 │  ┌──────────────────────────────────────────────────┐   │
 │  │  Deterministic core                               │   │
 │  │                                                   │   │
-│  │  models.py          Item, Dependency, Disposition │   │
+│  │  models.py          Item(+stage), Change, Dependency│   │
 │  │  dependency_        (Dependency, ObservedWorld)   │   │
 │  │    evaluator.py      → DependencyEvaluation (§3)  │   │
 │  │  dependency_        transitive blocked-ness (§3.4)│   │
 │  │    graph.py                                       │   │
 │  │  admission.py       WIP ceiling + unblocked (§4)  │   │
 │  │  lane_classifier    Gate A + Gate B pure fn       │   │
-│  │  disposition.py     §5.1 total over ItemState     │   │
+│  │  stage.py           the derived stage boundaries  │   │
+│  │  disposition.py     §5.1 total over ItemStage     │   │
 │  │  observed_gen.py    §5.5 skip optimization        │   │
 │  │  reconciler.py      the loop — ties it together   │   │
 │  └──────────────────────────────────────────────────┘   │
@@ -91,14 +92,19 @@ harness (dispatch, merge execution, PAT) lives in the private layer.
 | §3.3 | Spec/status stored separately | `models.Dependency` (spec) vs `DependencyEvaluation` (status) — separate types |
 | §3.4 | Dependencies compose transitively | `dependency_graph.py` — walks the closure, names the chain |
 | §4.1 | WIP ceiling | `admission.AdmissionController` — bounds the queue, not the rate |
-| §4.2 | Every carried item charged | `admission.current_wip` — counts drafts, blocked, in-review |
+| §4.2 | Every carried item charged | `admission.current_wip` — one predicate over the `in_flight` stage, no exempt sub-states |
 | §4.3 | PR opened only for unblocked | `admission.can_admit` — rejects blocked issues |
-| §5.1 | One total reconciler | `disposition.py` — every `ItemState` maps to exactly one disposition |
+| §3 | One item with stages, not two populations | `models.ItemStage` — `proposed → ready → in_flight → merged → verified → done`, `abandoned` from any |
+| §3.5 | A self-resolvable condition is work, not a dependency | `disposition._condition_conflicted` — a conflicted change is ACT |
+| §3.8 | Post-merge verification lives on the item | `models.VerificationObligation` + the `merged → verified` transition |
+| §4.4 | Draft is not a resting state | `disposition._condition_draft` — a draft change is ACT |
+| §5.1 | One total reconciler | `disposition.py` — every `ItemStage` maps to exactly one disposition |
 | §5.3 | Idempotent and resumable | `reconciler.py` — re-running over identical state = same output |
 | §5.4 | Deterministic core, model at leaf | the core has no model import; the leaf is a strategy interface |
 | §5.5 | Observed-generation skip | `observed_gen.py` — records last-evaluated generation, skips unchanged |
 | §8.1 | Core runs against fixtures | `fixtures/` + `tests/` — no credentials needed |
-| F5 | No advanceable-but-unadvanced PRs | `disposition.py` — a PR the reconciler could advance but didn't is ACT |
+| F5 | No advanceable-but-unadvanced changes | `disposition.py` — an item the reconciler could advance but didn't is ACT |
+| F6/F7 | Residence and lead time | `ObservedGeneration.stage_entered_at` — per-stage entry stamps, the only source for both |
 
 ## Quick start
 
@@ -110,7 +116,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-That's it — 94 tests run over 8 fixture scenarios with no network, no
+That's it — the suite runs over the recorded fixture scenarios with no network, no
 credentials, and no model. If the last command exits 0, the core is
 correct against its recorded fixtures.
 
@@ -118,15 +124,16 @@ correct against its recorded fixtures.
 
 ```python
 from nousergon_groomer import (
-    Reconciler, ReconcilerConfig, Item, Dependency, DependencyKind,
-    ItemKind, ItemState,
+    Reconciler, ReconcilerConfig, Item, ItemStage, Dependency, DependencyKind,
 )
 from nousergon_groomer.dependency_evaluator import ObservedWorld
 from nousergon_groomer.observed_gen import GenerationStore
 
-# Record an issue with a declared dependency
-issue = Item(
-    id="i1", kind=ItemKind.ISSUE, state=ItemState.OPEN_ISSUE_ACTIONABLE,
+# One item — a unit of intended change — at the `proposed` stage, with a
+# declared dependency. There is no "issue" type and no "PR" type: an issue and
+# its pull request are the same item at two points in its life.
+item = Item(
+    id="i1", stage=ItemStage.PROPOSED,
     declared_dependencies=[
         Dependency(kind=DependencyKind.S3_OBJECT, target="s3://bucket/key"),
     ],
@@ -138,11 +145,36 @@ world = ObservedWorld(s3_objects=set())
 # Run one reconciliation pass
 config = ReconcilerConfig(wip_ceiling=5, generation=1)
 reconciler = Reconciler(config)
-result = reconciler.reconcile([issue], world, GenerationStore())
+result = reconciler.reconcile([item], world, GenerationStore())
 
-# The issue is BLOCKED on the S3 object
+# BLOCKED on the S3 object — and still at `proposed`, because `ready` is
+# derived from an empty blocking chain rather than stored.
 assert result.items[0].disposition.kind.value == "blocked"
+assert result.items[0].stage is ItemStage.PROPOSED
 ```
+
+Once the world reports the object, the same item reconciles to `ready` and
+`ACT(create_pr)` with no actor and no label edit — the next cycle simply
+computes it.
+
+### The stage machine
+
+```
+proposed ──▶ ready ──▶ in_flight ──▶ merged ──▶ verified ──▶ done
+    │          │           │            │           │
+    └──────────┴───────────┴────────────┴───────────┴──▶ abandoned
+```
+
+`ready` and `verified` are **derived, never stored**: the first is `proposed`
+with no unsatisfied dependency, the second is `merged` with its post-merge
+verification obligation discharged. Use `effective_stage(item, graph, world)`,
+not `item.stage`, to ask where an item is.
+
+A pull request is the *rendering* of `in_flight`. Its green/red/dirty/draft
+distinctions are a `ChangeCondition` on `Item.change` — conditions of one
+stage, not states an item rests in. That is what makes a conflicted change
+`ACT(resolve_conflicts)` rather than a blocked item (§3.5), and a draft
+`ACT(advance_draft)` rather than a parking space (§4.4).
 
 ## Fixtures
 

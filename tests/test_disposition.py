@@ -2,24 +2,40 @@
 
 These tests assert:
 
-1. **Exhaustiveness** — every ``ItemState`` is handled (either dispatched or
-   terminal), so a new state can never silently fall through.
-2. **Per-state correctness** — each state yields the documented disposition.
-3. **Precedence** — human-owned > terminal > undecidable > state-specific.
-4. **F5 readiness** — a green PR blocked on a dep returns BLOCKED, not ACT.
+1. **Exhaustiveness** — every ``ItemStage`` is handled (either dispatched or
+   terminal) and every ``ChangeCondition`` has a handler, so neither a new
+   stage nor a new condition can silently fall through.
+2. **Per-stage correctness** — each stage yields the documented disposition.
+3. **Precedence** — human-owned > excluded > terminal > undecidable >
+   unbacked-gate > stage-specific.
+4. **F5 readiness** — an item in flight blocked on a dep returns BLOCKED, not ACT.
+
+Every rule asserted here is defined over an item and scoped to a stage. There
+is deliberately no test named "a PR does X": §3 forbids a rule over pull
+requests alone, and a test written that way would be asserting the model this
+change removed.
 """
 from __future__ import annotations
 
+import datetime as _dt
+
 from nousergon_groomer.dependency_evaluator import ObservedWorld
 from nousergon_groomer.dependency_graph import DependencyGraph
-from nousergon_groomer.disposition import _STATE_DISPATCH, _TERMINAL_STATES, compute_disposition
+from nousergon_groomer.disposition import (
+    _CONDITION_DISPATCH,
+    _STAGE_DISPATCH,
+    _TERMINAL_STAGES,
+    compute_disposition,
+)
 from nousergon_groomer.models import (
+    Change,
+    ChangeCondition,
     Dependency,
     DependencyKind,
     DispositionKind,
     Item,
-    ItemKind,
-    ItemState,
+    ItemStage,
+    VerificationObligation,
 )
 
 # ---------------------------------------------------------------------------
@@ -37,14 +53,28 @@ def _world_full() -> ObservedWorld:
     )
 
 
-def _item(state: ItemState, **kw) -> Item:
-    defaults = {"id": "i1", "kind": ItemKind.ISSUE, "state": state}
+def _item(stage: ItemStage = ItemStage.PROPOSED, **kw) -> Item:
+    """An item with no change — every stage before one exists."""
+    defaults = {"id": "i1", "stage": stage}
     defaults.update(kw)
     return Item(**defaults)
 
 
-def _pr(state: ItemState, **kw) -> Item:
-    defaults = {"id": "p1", "kind": ItemKind.PR, "state": state}
+def _pr(condition: ChangeCondition = ChangeCondition.CLEAN, **kw) -> Item:
+    """An item in flight, carrying a change in ``condition``."""
+    item_id = kw.pop("id", "p1")
+    change = Change(
+        ref=item_id,
+        condition=condition,
+        mergeable=kw.pop("mergeable", None),
+        ci_green=kw.pop("ci_green", None),
+        security_threads=kw.pop("security_threads", 0),
+    )
+    defaults = {
+        "id": item_id,
+        "stage": kw.pop("stage", ItemStage.IN_FLIGHT),
+        "change": change,
+    }
     defaults.update(kw)
     return Item(**defaults)
 
@@ -54,30 +84,41 @@ def _graph(items: list[Item], world: ObservedWorld) -> DependencyGraph:
 
 
 # ---------------------------------------------------------------------------
-# 1. Exhaustiveness — every ItemState is covered
+# 1. Exhaustiveness — every ItemStage and every ChangeCondition is covered
 # ---------------------------------------------------------------------------
 
-def test_every_state_is_terminal_or_dispatched():
-    """§5.1 totality: every ItemState must be in the dispatch table or terminal set."""
-    all_states = set(ItemState)
-    covered = set(_STATE_DISPATCH) | _TERMINAL_STATES
-    uncovered = all_states - covered
-    assert not uncovered, f"ItemState values with no handler: {uncovered}"
+def test_every_stage_is_terminal_or_dispatched():
+    """§5.1 totality: every ItemStage is in the dispatch table or terminal set."""
+    uncovered = set(ItemStage) - (set(_STAGE_DISPATCH) | _TERMINAL_STAGES)
+    assert not uncovered, f"ItemStage values with no handler: {uncovered}"
 
 
-def test_no_state_is_both_terminal_and_dispatched():
-    """A state should not appear in both the terminal set and the dispatch table."""
-    overlap = _TERMINAL_STATES & set(_STATE_DISPATCH)
-    assert not overlap, f"states in both terminal and dispatch: {overlap}"
+def test_no_stage_is_both_terminal_and_dispatched():
+    """A stage should not appear in both the terminal set and the dispatch table."""
+    overlap = _TERMINAL_STAGES & set(_STAGE_DISPATCH)
+    assert not overlap, f"stages in both terminal and dispatch: {overlap}"
+
+
+def test_every_change_condition_is_dispatched():
+    """The second totality surface the stage model introduces.
+
+    Demoting the PR sub-states from item states to stage conditions moved them
+    out of ``_STAGE_DISPATCH``'s exhaustiveness check. Without this test a new
+    condition would reach a ``NotImplementedError`` in production rather than a
+    red test here.
+    """
+    uncovered = set(ChangeCondition) - set(_CONDITION_DISPATCH)
+    assert not uncovered, f"ChangeCondition values with no handler: {uncovered}"
 
 
 # ---------------------------------------------------------------------------
-# 2. Precedence — human-owned > terminal > undecidable > state-specific
+# 2. Precedence — human-owned > excluded > terminal > undecidable >
+#    unbacked-gate > stage-specific
 # ---------------------------------------------------------------------------
 
 def test_human_owned_takes_precedence_over_terminal():
-    """§9 carve-out 1: a human-owned MERGED item is TERMINAL (surface and stop)."""
-    item = _item(ItemState.MERGED, human_owned=True)
+    """§9 carve-out 1: a human-owned merged item is TERMINAL (surface and stop)."""
+    item = _item(ItemStage.MERGED, human_owned=True)
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -85,19 +126,19 @@ def test_human_owned_takes_precedence_over_terminal():
     assert "human-owned" in d.reason
 
 
-def test_human_owned_takes_precedence_over_actionable():
-    """A human-owned actionable issue is TERMINAL, not ACT."""
-    item = _item(ItemState.OPEN_ISSUE_ACTIONABLE, human_owned=True)
+def test_human_owned_takes_precedence_over_ready():
+    """A human-owned ready item is TERMINAL, not ACT."""
+    item = _item(human_owned=True)
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
     assert d.kind is DispositionKind.TERMINAL
 
 
-def test_undecidable_dep_takes_precedence_over_state_action():
-    """An actionable issue with an undecidable dep is UNDECIDABLE, not ACT."""
+def test_undecidable_dep_takes_precedence_over_stage_action():
+    """A ready item with an undecidable dep is UNDECIDABLE, not ACT."""
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
-    item = _item(ItemState.OPEN_ISSUE_ACTIONABLE, declared_dependencies=[dep])
+    item = _item(declared_dependencies=[dep])
     # s3_objects is None → undecidable
     world = ObservedWorld()
     graph = _graph([item], world)
@@ -107,32 +148,34 @@ def test_undecidable_dep_takes_precedence_over_state_action():
 
 
 # ---------------------------------------------------------------------------
-# 3. Per-state correctness
+# 3. Per-stage correctness
 # ---------------------------------------------------------------------------
 
-def test_merged_is_terminal():
-    item = _item(ItemState.MERGED)
+def test_done_is_terminal():
+    item = _item(ItemStage.DONE)
     world = _world_full()
     graph = _graph([item], world)
     assert compute_disposition(item, graph, world).kind is DispositionKind.TERMINAL
 
 
-def test_closed_is_terminal():
-    item = _item(ItemState.CLOSED)
+def test_abandoned_is_terminal():
+    item = _item(ItemStage.ABANDONED)
     world = _world_full()
     graph = _graph([item], world)
     assert compute_disposition(item, graph, world).kind is DispositionKind.TERMINAL
 
 
-def test_do_not_groom_is_terminal():
-    item = _item(ItemState.DO_NOT_GROOM)
+def test_do_not_groom_is_terminal_without_overwriting_the_stage():
+    item = _item(ItemStage.PROPOSED, do_not_groom=True)
     world = _world_full()
     graph = _graph([item], world)
-    assert compute_disposition(item, graph, world).kind is DispositionKind.TERMINAL
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.TERMINAL
+    assert "do_not_groom" in d.reason
 
 
-def test_open_issue_actionable_unblocked_is_act():
-    item = _item(ItemState.OPEN_ISSUE_ACTIONABLE)
+def test_ready_item_is_act_create_pr():
+    item = _item()
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -140,9 +183,9 @@ def test_open_issue_actionable_unblocked_is_act():
     assert d.action == "create_pr"
 
 
-def test_open_issue_actionable_blocked_is_blocked():
+def test_proposed_item_with_an_unsatisfied_dependency_is_blocked():
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
-    item = _item(ItemState.OPEN_ISSUE_ACTIONABLE, declared_dependencies=[dep])
+    item = _item(declared_dependencies=[dep])
     world = _world_full()  # s3_objects is empty set → dep unsatisfied
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -150,35 +193,32 @@ def test_open_issue_actionable_blocked_is_blocked():
     assert "blocked on" in d.reason
 
 
-def test_open_issue_blocked_with_chain_is_blocked():
+def test_a_recorded_ready_stage_is_re_derived_not_trusted():
+    """A harness may record `ready`; the loop re-derives it every cycle (§3).
+
+    Trusting the recorded value would reintroduce asserted blocked-ness — the
+    exact property §3 abolishes — one bad write away.
+    """
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
-    item = _item(ItemState.OPEN_ISSUE_BLOCKED, declared_dependencies=[dep])
+    item = _item(ItemStage.READY, declared_dependencies=[dep])
+    world = _world_full()
+    graph = _graph([item], world)
+    assert compute_disposition(item, graph, world).kind is DispositionKind.BLOCKED
+
+
+def test_an_in_flight_item_whose_change_is_enumerated_separately_defers():
+    """One unit, one verdict — the record holding the change owns it (§3)."""
+    item = Item(id="i1", stage=ItemStage.IN_FLIGHT, change_ref="p1")
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
-    assert d.kind is DispositionKind.BLOCKED
+    assert d.kind is DispositionKind.TERMINAL
+    assert "p1" in d.reason
 
 
-def test_open_issue_blocked_without_chain_is_undecidable():
-    """State says BLOCKED but no unsatisfied dep → loud inconsistency."""
-    item = _item(ItemState.OPEN_ISSUE_BLOCKED)
-    world = _world_full()
-    graph = _graph([item], world)
-    d = compute_disposition(item, graph, world)
-    assert d.kind is DispositionKind.UNDECIDABLE
-    assert "inconsistency" in d.reason
-
-
-def test_open_issue_waiting_is_terminal():
-    item = _item(ItemState.OPEN_ISSUE_WAITING)
-    world = _world_full()
-    graph = _graph([item], world)
-    assert compute_disposition(item, graph, world).kind is DispositionKind.TERMINAL
-
-
-def test_open_clean_green_no_lane_is_terminal():
-    """Green PR not auto-merge-eligible → terminal (needs human review)."""
-    item = _pr(ItemState.OPEN_CLEAN_GREEN, mergeable=True, ci_green=True)
+def test_clean_change_no_lane_is_terminal():
+    """A clean, green change not auto-merge-eligible → terminal (needs review)."""
+    item = _pr(mergeable=True, ci_green=True)
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -186,14 +226,9 @@ def test_open_clean_green_no_lane_is_terminal():
     assert "human review" in d.reason
 
 
-def test_open_clean_green_with_lane_is_act():
-    """Green PR with an auto-merge lane → ACT (automerge)."""
-    item = _pr(
-        ItemState.OPEN_CLEAN_GREEN,
-        mergeable=True,
-        ci_green=True,
-        labels=["groom-reviewed"],
-    )
+def test_clean_change_with_lane_is_act():
+    """A clean, green change with an auto-merge lane → ACT (automerge)."""
+    item = _pr(mergeable=True, ci_green=True, labels=["groom-reviewed"])
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -201,8 +236,8 @@ def test_open_clean_green_with_lane_is_act():
     assert d.action == "automerge"
 
 
-def test_open_red_ci_is_act():
-    item = _pr(ItemState.OPEN_RED_CI, ci_green=False)
+def test_ci_red_change_is_act():
+    item = _pr(ChangeCondition.CI_RED, ci_green=False)
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -210,17 +245,26 @@ def test_open_red_ci_is_act():
     assert d.action == "fix_ci"
 
 
-def test_open_dirty_is_act():
-    item = _pr(ItemState.OPEN_DIRTY, mergeable=False)
+def test_conflicted_change_is_act_not_blocked():
+    """alpha-engine-config#6307 closes-when 2, at the disposition function.
+
+    §3.5: a conflict is inside the loop's own write authority, so it is work.
+    Under the pre-0.9.0 model the pull request had its own blocked state, and a
+    conflict — a property of the in-flight stage — got declared a dependency of
+    the item, which is how most blocked PRs in the fleet came to be merely
+    conflicted or behind ``main``.
+    """
+    item = _pr(ChangeCondition.CONFLICTED, mergeable=False)
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
     assert d.kind is DispositionKind.ACT
     assert d.action == "resolve_conflicts"
+    assert d.kind is not DispositionKind.BLOCKED
 
 
-def test_open_draft_no_gate_is_act():
-    item = _pr(ItemState.OPEN_DRAFT, is_draft=True)
+def test_draft_change_is_act():
+    item = _pr(ChangeCondition.DRAFT)
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -228,13 +272,13 @@ def test_open_draft_no_gate_is_act():
     assert d.action == "advance_draft"
 
 
-def test_open_draft_with_unbacked_gate_label_is_undecidable():
+def test_draft_with_unbacked_gate_label_is_undecidable():
     """A gate:* label with no declaration is a §3.3 defect, not a state.
 
     Previously TERMINAL ("at rest on gate label"), which read the label as
     state — retired by alpha-engine-config#6137.
     """
-    item = _pr(ItemState.OPEN_DRAFT, is_draft=True, labels=["gate:weekly-sf"])
+    item = _pr(ChangeCondition.DRAFT, labels=["gate:weekly-sf"])
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -246,7 +290,7 @@ def test_open_draft_with_unbacked_gate_label_is_undecidable():
 def test_open_draft_with_a_satisfied_gate_dependency_is_act():
     """A cleared gate advances the draft — no label edit, no actor (§3)."""
     dep = Dependency(kind=DependencyKind.PIPELINE_RUN, target="ne-weekly-freshness-pipeline")
-    item = _pr(ItemState.OPEN_DRAFT, is_draft=True, labels=["gate:weekly-sf"],
+    item = _pr(ChangeCondition.DRAFT, labels=["gate:weekly-sf"],
                declared_dependencies=[dep])
     world = ObservedWorld(
         s3_objects=set(), s3_prefixes=set(), terminal_items=set(),
@@ -261,7 +305,7 @@ def test_open_draft_with_a_satisfied_gate_dependency_is_act():
 def test_open_draft_with_an_unsatisfied_gate_dependency_names_the_condition():
     """BLOCKED names the S3 key the gate stood for, not the label."""
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/weekly.json")
-    item = _pr(ItemState.OPEN_DRAFT, is_draft=True, labels=["gate:weekly-sf"],
+    item = _pr(ChangeCondition.DRAFT, labels=["gate:weekly-sf"],
                declared_dependencies=[dep])
     world = _world_full()
     graph = _graph([item], world)
@@ -272,21 +316,102 @@ def test_open_draft_with_an_unsatisfied_gate_dependency_names_the_condition():
 
 
 def test_open_pending_ci_is_terminal():
-    item = _pr(ItemState.OPEN_PENDING_CI)
+    item = _pr(ChangeCondition.CI_PENDING)
     world = _world_full()
     graph = _graph([item], world)
     assert compute_disposition(item, graph, world).kind is DispositionKind.TERMINAL
 
 
 # ---------------------------------------------------------------------------
-# 4. F5 readiness — blocked deps override advanceable PR states
+# 3b. The merged stage and its verification obligation (§3.8)
+#
+#     `merged` is not terminal. An item resting here is owed a post-merge
+#     verification its own merged code produces — a real condition outside the
+#     loop's authority, so a legitimate BLOCKED, but a bounded one.
+# ---------------------------------------------------------------------------
+
+def _verified_when(target="s3://b/verify.json", deadline="2026-08-10"):
+    return VerificationObligation(
+        predicate=Dependency(kind=DependencyKind.S3_OBJECT, target=target),
+        deadline=deadline,
+    )
+
+
+def _dated_world(**kw) -> ObservedWorld:
+    world = _world_full()
+    return world.model_copy(update={"today": _dt.date(2026, 8, 4), **kw})
+
+
+def test_merged_awaiting_verification_is_blocked_not_terminal():
+    item = _item(ItemStage.MERGED, verification=_verified_when())
+    world = _dated_world()
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.BLOCKED
+    assert "awaiting post-merge verification" in d.reason
+    assert "2026-08-10" in d.reason
+
+
+def test_merged_with_a_satisfied_predicate_is_verified_and_terminal():
+    item = _item(ItemStage.MERGED, verification=_verified_when())
+    world = _dated_world(s3_objects={"s3://b/verify.json"})
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.TERMINAL
+    assert "verified in production" in d.reason
+
+
+def test_merged_past_its_deadline_is_act_revert():
+    """§3.6: expiry is an event with an action, never another interval."""
+    item = _item(ItemStage.MERGED, verification=_verified_when(deadline="2026-08-01"))
+    world = _dated_world()
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.ACT
+    assert d.action == "revert"
+
+
+def test_merged_honours_a_custom_revert_action():
+    obligation = VerificationObligation(
+        predicate=Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/verify.json"),
+        deadline="2026-08-01",
+        revert_action="roll_back_deployment",
+    )
+    item = _item(ItemStage.MERGED, verification=obligation)
+    world = _dated_world()
+    graph = _graph([item], world)
+    assert compute_disposition(item, graph, world).action == "roll_back_deployment"
+
+
+def test_merged_with_an_undecidable_predicate_is_undecidable():
+    item = _item(ItemStage.MERGED, verification=_verified_when())
+    world = _dated_world(s3_objects=None)
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.UNDECIDABLE
+    assert "s3://b/verify.json" in d.reason
+
+
+def test_merged_with_no_reported_date_is_undecidable_not_not_yet():
+    """Whether the obligation expired is unknowable, and "not yet" is not a
+    safe default — that is how an expired wait becomes an unbounded one."""
+    item = _item(ItemStage.MERGED, verification=_verified_when())
+    world = _world_full()  # today is None
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.UNDECIDABLE
+    assert "no date" in d.reason
+
+
+# ---------------------------------------------------------------------------
+# 4. F5 readiness — a blocked dep outranks every in-flight condition
 # ---------------------------------------------------------------------------
 
 def test_green_pr_blocked_on_dep_is_blocked_not_act():
     """F5: a green PR blocked on a declared dep is BLOCKED, not ACT (automerge)."""
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
     item = _pr(
-        ItemState.OPEN_CLEAN_GREEN,
+        ChangeCondition.CLEAN,
         mergeable=True,
         ci_green=True,
         labels=["groom-reviewed"],
@@ -302,7 +427,7 @@ def test_red_pr_blocked_on_dep_is_blocked_not_act():
     """F5: a red PR blocked on a dep is BLOCKED, not ACT (fix_ci)."""
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
     item = _pr(
-        ItemState.OPEN_RED_CI,
+        ChangeCondition.CI_RED,
         ci_green=False,
         declared_dependencies=[dep],
     )
@@ -320,10 +445,10 @@ def test_transitive_block_surfaces_root_cause():
     """An issue blocked through an intermediate issue names the root leaf."""
     # i2 is blocked on s3://b/k (root cause)
     dep2 = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
-    i2 = _item(ItemState.OPEN_ISSUE_BLOCKED, id="i2", declared_dependencies=[dep2])
+    i2 = _item(id="i2", declared_dependencies=[dep2])
     # i1 depends on i2 being terminal; i2 is not terminal → i1 is transitively blocked
     dep1 = Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i2")
-    i1 = _item(ItemState.OPEN_ISSUE_ACTIONABLE, id="i1", declared_dependencies=[dep1])
+    i1 = _item(id="i1", declared_dependencies=[dep1])
     world = _world_full()
     graph = _graph([i1, i2], world)
     d = compute_disposition(i1, graph, world)
@@ -350,7 +475,7 @@ def test_green_lane_pr_with_unbacked_gate_label_is_undecidable_not_automerge():
     against it is a gate:* label with nothing declared behind it — and a core
     that resolved that projection in the permissive direction would merge it.
     """
-    item = _pr(ItemState.OPEN_CLEAN_GREEN, labels=["gate:operator", "groom-reviewed"],
+    item = _pr(ChangeCondition.CLEAN, labels=["gate:operator", "groom-reviewed"],
                mergeable=True, ci_green=True)
     world = _world_full()
     graph = _graph([item], world)
@@ -370,7 +495,7 @@ def test_green_lane_pr_with_satisfied_gate_dependency_automerges():
         Dependency(kind=DependencyKind.PIPELINE_RUN, target="ne-weekly-freshness-pipeline"),
         Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/weekly.json"),
     ]
-    item = _pr(ItemState.OPEN_CLEAN_GREEN, labels=["gate:weekly-sf", "groom-reviewed"],
+    item = _pr(ChangeCondition.CLEAN, labels=["gate:weekly-sf", "groom-reviewed"],
                mergeable=True, ci_green=True, declared_dependencies=deps)
     world = ObservedWorld(
         s3_objects={"s3://b/weekly.json"}, s3_prefixes=set(), terminal_items=set(),
@@ -384,7 +509,7 @@ def test_green_lane_pr_with_satisfied_gate_dependency_automerges():
 
 def test_green_lane_pr_with_unsatisfied_gate_dependency_is_blocked_on_the_condition():
     deps = [Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/weekly.json")]
-    item = _pr(ItemState.OPEN_CLEAN_GREEN, labels=["gate:weekly-sf", "groom-reviewed"],
+    item = _pr(ChangeCondition.CLEAN, labels=["gate:weekly-sf", "groom-reviewed"],
                mergeable=True, ci_green=True, declared_dependencies=deps)
     world = _world_full()
     graph = _graph([item], world)
@@ -395,7 +520,7 @@ def test_green_lane_pr_with_unsatisfied_gate_dependency_is_blocked_on_the_condit
 
 def test_gate_labelled_issue_with_no_declaration_is_undecidable_not_actionable():
     """The issue half of the same population — never silently dispatched."""
-    item = _item(ItemState.OPEN_ISSUE_ACTIONABLE, labels=["gate:decision", "P1"])
+    item = _item(labels=["gate:decision", "P1"])
     world = _world_full()
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -411,7 +536,7 @@ def test_undecidable_dependency_outranks_the_unbacked_projection_check():
     reads must be the dependency the world failed to report.
     """
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
-    item = _pr(ItemState.OPEN_CLEAN_GREEN, labels=["gate:data"], mergeable=True,
+    item = _pr(ChangeCondition.CLEAN, labels=["gate:data"], mergeable=True,
                ci_green=True, declared_dependencies=[dep])
     world = ObservedWorld()  # nothing reported
     graph = _graph([item], world)

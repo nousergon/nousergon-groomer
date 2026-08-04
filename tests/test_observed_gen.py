@@ -17,8 +17,7 @@ from nousergon_groomer.models import (
     Dependency,
     DependencyKind,
     Item,
-    ItemKind,
-    ItemState,
+    ItemStage,
     ObservedGeneration,
 )
 from nousergon_groomer.observed_gen import (
@@ -30,7 +29,7 @@ from nousergon_groomer.observed_gen import (
 
 
 def _item(**kw) -> Item:
-    defaults = {"id": "i1", "kind": ItemKind.ISSUE, "state": ItemState.OPEN_ISSUE_ACTIONABLE}
+    defaults = {"id": "i1", "stage": ItemStage.PROPOSED}
     defaults.update(kw)
     return Item(**defaults)
 

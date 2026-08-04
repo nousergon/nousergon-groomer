@@ -1,10 +1,9 @@
 {
-  "description": "An item with an unobservable dependency (s3_objects not reported) → UNDECIDABLE (§3 honest degradation)",
+  "description": "An item with an unobservable dependency (s3_objects not reported) → UNDECIDABLE (§3 honest degradation). Its effective stage stays `proposed`, not `ready`: an undecidable dependency is not a definite blocker, but it is not a confirmation of readiness either, and calling it `ready` would enter it in F3's conversion denominator on a fact nobody established.",
   "items": [
     {
       "id": "i1",
-      "kind": "issue",
-      "state": "open_issue_actionable",
+      "stage": "proposed",
       "title": "Depends on unobservable S3",
       "declared_dependencies": [
         {"kind": "s3_object", "target": "s3://bucket/key"}
@@ -18,6 +17,6 @@
     "pipeline_runs": null
   },
   "expected": {
-    "i1": {"kind": "undecidable"}
+    "i1": {"kind": "undecidable", "stage": "proposed"}
   }
 }

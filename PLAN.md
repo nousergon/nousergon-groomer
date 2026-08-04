@@ -43,7 +43,7 @@ the policy requires.
 │  │    graph.py                                       │   │
 │  │  admission.py     WIP ceiling + unblocked (§4)    │   │
 │  │  lane_classifier  Gate A + Gate B pure fn          │   │
-│  │  disposition.py  §5.1 total over ItemState        │   │
+│  │  disposition.py  §5.1 total over ItemStage        │   │
 │  │  observed_gen.py  §5.5 skip optimization          │   │
 │  │  reconciler.py    the loop — ties it together      │   │
 │  └──────────────────────────────────────────────────┘   │
@@ -86,7 +86,7 @@ the policy requires.
 | §4.1 | WIP ceiling | `admission.AdmissionController` — bounds the queue, not the rate |
 | §4.2 | Every carried item charged | `admission.current_wip` — counts drafts, blocked, in-review |
 | §4.3 | PR opened only for unblocked | `admission.can_admit` — rejects blocked issues |
-| §5.1 | One total reconciler | `disposition.py` — every ItemState maps to exactly one disposition |
+| §5.1 | One total reconciler | `disposition.py` — every ItemStage maps to exactly one disposition |
 | §5.3 | Idempotent and resumable | `reconciler.py` — re-running over identical state = same output |
 | §5.4 | Deterministic core, model at leaf | the core has no model import; the leaf is a strategy interface |
 | §5.5 | Observed-generation skip | `observed_gen.py` — records last-evaluated generation, skips unchanged |

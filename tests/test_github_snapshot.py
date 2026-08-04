@@ -7,7 +7,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from nousergon_groomer.github_snapshot import GitHubSnapshot, IssueFieldConformance, SnapshotError
-from nousergon_groomer.models import Dependency, DependencyKind, ItemKind, ItemState
+from nousergon_groomer.models import (
+    ChangeCondition,
+    Dependency,
+    DependencyKind,
+    ItemStage,
+)
 
 
 def _mock_response(status_code: int, json_data: object, headers: dict | None = None) -> MagicMock:
@@ -153,10 +158,11 @@ def test_clean_green_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) 
     ]
 
     items, _world = snapshot.fetch("owner/repo")
-    pr = next(item for item in items if item.kind is ItemKind.PR)
-    assert pr.state is ItemState.OPEN_CLEAN_GREEN
-    assert pr.ci_green is True
-    assert pr.mergeable is True
+    pr = next(item for item in items if item.carries_change)
+    assert pr.stage is ItemStage.IN_FLIGHT
+    assert pr.change.condition is ChangeCondition.CLEAN
+    assert pr.change.ci_green is True
+    assert pr.change.mergeable is True
 
 
 def test_draft_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
@@ -170,8 +176,9 @@ def test_draft_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> Non
 
     items, _world = snapshot.fetch("owner/repo")
     pr = items[0]
-    assert pr.state is ItemState.OPEN_DRAFT
-    assert pr.is_draft is True
+    assert pr.stage is ItemStage.IN_FLIGHT
+    assert pr.change.condition is ChangeCondition.DRAFT
+    assert pr.change.is_draft is True
 
 
 def test_dirty_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
@@ -184,7 +191,7 @@ def test_dirty_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> Non
     ]
 
     items, _world = snapshot.fetch("owner/repo")
-    assert items[0].state is ItemState.OPEN_DIRTY
+    assert items[0].change.condition is ChangeCondition.CONFLICTED
 
 
 def test_red_ci_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
@@ -197,8 +204,8 @@ def test_red_ci_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> No
     ]
 
     items, _world = snapshot.fetch("owner/repo")
-    assert items[0].state is ItemState.OPEN_RED_CI
-    assert items[0].ci_green is False
+    assert items[0].change.condition is ChangeCondition.CI_RED
+    assert items[0].change.ci_green is False
 
 
 def test_pending_ci_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
@@ -211,8 +218,8 @@ def test_pending_ci_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -
     ]
 
     items, _world = snapshot.fetch("owner/repo")
-    assert items[0].state is ItemState.OPEN_PENDING_CI
-    assert items[0].ci_green is None
+    assert items[0].change.condition is ChangeCondition.CI_PENDING
+    assert items[0].change.ci_green is None
 
 
 def test_issue_without_linked_pr_is_actionable(
@@ -227,8 +234,9 @@ def test_issue_without_linked_pr_is_actionable(
 
     items, _world = snapshot.fetch("owner/repo")
     issue = items[0]
-    assert issue.kind is ItemKind.ISSUE
-    assert issue.state is ItemState.OPEN_ISSUE_ACTIONABLE
+    assert issue.carries_change is False
+    assert issue.stage is ItemStage.PROPOSED
+    assert issue.change_ref is None
 
 
 def test_issue_with_linked_open_pr_is_waiting(
@@ -243,8 +251,12 @@ def test_issue_with_linked_open_pr_is_waiting(
     ]
 
     items, _world = snapshot.fetch("owner/repo")
-    issue = next(item for item in items if item.kind is ItemKind.ISSUE)
-    assert issue.state is ItemState.OPEN_ISSUE_WAITING
+    issue = next(item for item in items if not item.carries_change)
+    # One unit at one stage: the issue is IN_FLIGHT because a change exists,
+    # and it names the record carrying it rather than being a second
+    # population "waiting on review".
+    assert issue.stage is ItemStage.IN_FLIGHT
+    assert issue.change_ref == "22"
 
 
 def test_api_404_raises_snapshot_error(snapshot: GitHubSnapshot, mock_client: MagicMock) -> None:
@@ -279,10 +291,10 @@ def test_returned_items_are_valid(snapshot: GitHubSnapshot, mock_client: MagicMo
     assert len(items) == 2
     issue, pr = items
     assert issue.id == "30"
-    assert issue.kind is ItemKind.ISSUE
+    assert issue.carries_change is False
     assert issue.labels == ["bug"]
     assert pr.id == "31"
-    assert pr.kind is ItemKind.PR
+    assert pr.carries_change is True
     assert pr.labels == ["groom-reviewed"]
 
 
@@ -332,12 +344,12 @@ def test_pr_from_list_with_null_mergeable_enriched_by_detail_endpoint(
 
     items, _world = snapshot.fetch("owner/repo")
     pr = items[0]
-    assert pr.kind is ItemKind.PR
-    assert pr.state is ItemState.OPEN_DIRTY, (
-        f"Expected OPEN_DIRTY for mergeable=False / mergeable_state=dirty, "
-        f"got {pr.state}"
+    assert pr.carries_change is True
+    assert pr.change.condition is ChangeCondition.CONFLICTED, (
+        "Expected CONFLICTED for mergeable=False / mergeable_state=dirty, "
+        f"got {pr.change.condition}"
     )
-    assert pr.mergeable is False
+    assert pr.change.mergeable is False
 
 
 def test_terminal_items_from_closed_and_merged(
@@ -398,9 +410,9 @@ def test_pr_enrichment_failure_logs_warning_and_falls_back(
         items, _world = snapshot.fetch("owner/repo")
 
     pr = items[0]
-    assert pr.kind is ItemKind.PR
+    assert pr.carries_change is True
     # Fallback preserved: list data (null mergeability) is what survives.
-    assert pr.mergeable is None
+    assert pr.change.mergeable is None
     # The degradation is observable, not silently swallowed.
     assert any(
         "Per-PR mergeability enrichment failed" in record.getMessage()

@@ -1,10 +1,9 @@
 {
-  "description": "An issue blocked on an S3 object → BLOCKED naming the chain",
+  "description": "A proposed item blocked on an S3 object → BLOCKED naming the chain. Its effective stage stays `proposed`: `ready` is derived from an empty blocking chain, never stored, so an item that cannot start has not reached it.",
   "items": [
     {
       "id": "i1",
-      "kind": "issue",
-      "state": "open_issue_actionable",
+      "stage": "proposed",
       "title": "Build feature Y",
       "labels": [],
       "declared_dependencies": [
@@ -19,6 +18,6 @@
     "pipeline_runs": []
   },
   "expected": {
-    "i1": {"kind": "blocked"}
+    "i1": {"kind": "blocked", "stage": "proposed"}
   }
 }

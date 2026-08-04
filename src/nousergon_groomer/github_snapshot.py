@@ -14,7 +14,14 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from .dependency_evaluator import ObservedWorld
-from .models import Dependency, DependencyKind, Item, ItemKind, ItemState
+from .models import (
+    Change,
+    ChangeCondition,
+    Dependency,
+    DependencyKind,
+    Item,
+    ItemStage,
+)
 
 _ISSUE_REF = re.compile(r"#(\d+)")
 _API_BASE = "https://api.github.com"
@@ -84,12 +91,27 @@ def _parse_ci_from_rollup(data: dict[str, Any]) -> Optional[bool]:
     return None
 
 
-def _issues_referenced_by_prs(prs: list[dict[str, Any]]) -> set[int]:
-    """Collect issue numbers referenced in open PR titles and bodies."""
-    refs: set[int] = set()
+def _change_refs_by_issue(prs: list[dict[str, Any]]) -> dict[int, str]:
+    """Map issue number → the ref of the open change rendering it (§3).
+
+    An issue named by an open pull request is not a separate population
+    "waiting on review" — it is the **same item**, at the ``in_flight`` stage,
+    and the pull request is what renders that stage. So this returns the ref
+    rather than a bare set: the issue-side record carries ``change_ref`` so the
+    two records are visibly one unit, and the disposition function defers to
+    whichever record actually holds the change instead of producing two
+    verdicts about one piece of work.
+
+    First reference wins when several pull requests name the same issue. That
+    is a stable, order-preserving choice rather than a correct one: linking one
+    issue to several open changes is a representation defect the write boundary
+    should reject (§3.1), tracked separately as the §5.6 identity work.
+    """
+    refs: dict[int, str] = {}
     for pr in prs:
         text = f"{pr.get('title', '')}\n{pr.get('body') or ''}"
-        refs.update(int(match) for match in _ISSUE_REF.findall(text))
+        for match in _ISSUE_REF.findall(text):
+            refs.setdefault(int(match), str(pr["number"]))
     return refs
 
 
@@ -151,7 +173,7 @@ def _custom_fields_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
-def _should_probe_dependencies(raw: dict[str, Any], *, kind: ItemKind) -> bool:
+def _should_probe_dependencies(raw: dict[str, Any], *, is_change: bool) -> bool:
     """Whether ``fetch()`` should call the ``blocked_by`` endpoint for this item.
 
     Issues carry ``issue_dependencies_summary`` inline on the list/get
@@ -169,7 +191,7 @@ def _should_probe_dependencies(raw: dict[str, Any], *, kind: ItemKind) -> bool:
     "not probed" rather than "assume zero and call anyway" — the safer
     default when the surface's presence itself is uncertain.
     """
-    if kind is ItemKind.PR:
+    if is_change:
         return True
     summary = raw.get("issue_dependencies_summary")
     if not summary:
@@ -191,51 +213,49 @@ def _should_probe_sub_issues(raw: dict[str, Any]) -> bool:
     return bool(summary.get("total"))
 
 
-def _derive_issue_state(
-    issue: dict[str, Any], issues_with_open_pr: set[int]
-) -> ItemState:
-    if issue["number"] in issues_with_open_pr:
-        return ItemState.OPEN_ISSUE_WAITING
-    return ItemState.OPEN_ISSUE_ACTIONABLE
+def _derive_change_condition(
+    pr: dict[str, Any], ci_green: Optional[bool]
+) -> ChangeCondition:
+    """Map a GitHub pull-request payload to the condition of the change (§3).
 
-
-def _derive_pr_state(pr: dict[str, Any], ci_green: Optional[bool]) -> ItemState:
+    Note what this function is *not* deciding: the item's stage. An open pull
+    request always means the item is ``in_flight`` — that is what the stage
+    means — and every distinction below is a condition *within* that stage, not
+    a different place for the item to be. The precedence is unchanged from the
+    pre-0.9.0 ``_derive_pr_state``; only what it produces has changed.
+    """
     if pr.get("draft"):
-        return ItemState.OPEN_DRAFT
+        return ChangeCondition.DRAFT
     mergeable = pr.get("mergeable")
     mergeable_state = pr.get("mergeable_state")
     if mergeable is False or mergeable_state == "dirty":
-        return ItemState.OPEN_DIRTY
+        return ChangeCondition.CONFLICTED
     if ci_green is False:
-        return ItemState.OPEN_RED_CI
+        return ChangeCondition.CI_RED
     if ci_green is None:
-        return ItemState.OPEN_PENDING_CI
+        return ChangeCondition.CI_PENDING
     if ci_green is True and (mergeable is True or mergeable_state == "clean"):
-        return ItemState.OPEN_CLEAN_GREEN
-    return ItemState.OPEN_PENDING_CI
+        return ChangeCondition.CLEAN
+    return ChangeCondition.CI_PENDING
 
 
-def _issue_to_item(
+def _raw_to_item(
     raw: dict[str, Any],
     *,
-    kind: ItemKind,
-    state: ItemState,
-    is_draft: bool = False,
-    mergeable: Optional[bool] = None,
-    ci_green: Optional[bool] = None,
+    stage: ItemStage,
+    change: Optional[Change] = None,
+    change_ref: Optional[str] = None,
     declared_dependencies: Optional[list[Dependency]] = None,
     custom_fields: Optional[dict[str, Any]] = None,
     sub_issue_ids: Optional[list[str]] = None,
 ) -> Item:
     return Item(
         id=str(raw["number"]),
-        kind=kind,
-        state=state,
+        stage=stage,
         title=raw.get("title") or "",
         labels=_label_names(raw),
-        is_draft=is_draft,
-        mergeable=mergeable,
-        ci_green=ci_green,
+        change=change,
+        change_ref=change_ref,
         declared_dependencies=declared_dependencies or [],
         custom_fields=custom_fields or {},
         sub_issue_ids=sub_issue_ids or [],
@@ -310,7 +330,7 @@ class GitHubSnapshot:
                     )
 
         open_issues = [issue for issue in open_issues_raw if "pull_request" not in issue]
-        issues_with_open_pr = _issues_referenced_by_prs(open_prs_raw)
+        change_refs_by_issue = _change_refs_by_issue(open_prs_raw)
 
         # Populated while walking the open issues/PRs below with any blocker
         # this fetch happened to observe as closed — including cross-repo
@@ -319,8 +339,8 @@ class GitHubSnapshot:
         # the blocker's own repo (config#6320).
         native_terminal_ids: set[str] = set()
 
-        def _native_dependencies(raw: dict[str, Any], *, kind: ItemKind) -> list[Dependency]:
-            if not _should_probe_dependencies(raw, kind=kind):
+        def _native_dependencies(raw: dict[str, Any], *, is_change: bool) -> list[Dependency]:
+            if not _should_probe_dependencies(raw, is_change=is_change):
                 return []
             number = raw["number"]
             try:
@@ -373,13 +393,17 @@ class GitHubSnapshot:
 
         items: list[Item] = []
         for issue in open_issues:
-            state = _derive_issue_state(issue, issues_with_open_pr)
+            # An open issue is `proposed`; readiness is derived by the
+            # reconciler, never recorded here (§3). An issue an open change
+            # already names is `in_flight` — the same item, one stage later,
+            # carrying the ref of the record that holds the change.
+            change_ref = change_refs_by_issue.get(issue["number"])
             items.append(
-                _issue_to_item(
+                _raw_to_item(
                     issue,
-                    kind=ItemKind.ISSUE,
-                    state=state,
-                    declared_dependencies=_native_dependencies(issue, kind=ItemKind.ISSUE),
+                    stage=ItemStage.IN_FLIGHT if change_ref else ItemStage.PROPOSED,
+                    change_ref=change_ref,
+                    declared_dependencies=_native_dependencies(issue, is_change=False),
                     custom_fields=_custom_fields_from_raw(issue),
                     sub_issue_ids=_native_sub_issue_ids(issue),
                 )
@@ -387,16 +411,22 @@ class GitHubSnapshot:
 
         for pr in open_prs_raw:
             ci_green = pr["_ci_green"] if "_ci_green" in pr else _parse_ci_from_rollup(pr)
-            state = _derive_pr_state(pr, ci_green)
+            # An open pull request IS the in_flight stage — there is no other
+            # stage it could put an item in, which is precisely the collapse
+            # §3 makes: every green/red/dirty/draft distinction below is a
+            # *condition* of this one stage, not a place to be.
             items.append(
-                _issue_to_item(
+                _raw_to_item(
                     pr,
-                    kind=ItemKind.PR,
-                    state=state,
-                    is_draft=bool(pr.get("draft")),
-                    mergeable=pr.get("mergeable"),
-                    ci_green=ci_green,
-                    declared_dependencies=_native_dependencies(pr, kind=ItemKind.PR),
+                    stage=ItemStage.IN_FLIGHT,
+                    change=Change(
+                        ref=str(pr["number"]),
+                        condition=_derive_change_condition(pr, ci_green),
+                        mergeable=pr.get("mergeable"),
+                        ci_green=ci_green,
+                        head_sha=(pr.get("head") or {}).get("sha"),
+                    ),
+                    declared_dependencies=_native_dependencies(pr, is_change=True),
                     custom_fields=_custom_fields_from_raw(pr),
                 )
             )

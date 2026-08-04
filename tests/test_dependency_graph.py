@@ -5,15 +5,15 @@ import pytest
 
 from nousergon_groomer.dependency_evaluator import ObservedWorld
 from nousergon_groomer.dependency_graph import DependencyCycleError, DependencyGraph
-from nousergon_groomer.models import Dependency, DependencyKind, Item, ItemKind, ItemState
+from nousergon_groomer.models import Dependency, DependencyKind, Item, ItemStage
 
 
 def _dep(kind, target):
     return Dependency(kind=kind, target=target)
 
 
-def _issue(id, deps=None, state=ItemState.OPEN_ISSUE_ACTIONABLE):
-    return Item(id=id, kind=ItemKind.ISSUE, state=state, declared_dependencies=deps or [])
+def _issue(id, deps=None, stage=ItemStage.PROPOSED):
+    return Item(id=id, stage=stage, declared_dependencies=deps or [])
 
 
 def _world():
@@ -54,7 +54,7 @@ def test_not_blocked_when_no_deps():
 # ---------------------------------------------------------------------------
 
 def test_transitive_blocked_two_levels():
-    i2 = _issue("i2", [_dep(DependencyKind.S3_OBJECT, "s3://b/k")], state=ItemState.OPEN_ISSUE_BLOCKED)
+    i2 = _issue("i2", [_dep(DependencyKind.S3_OBJECT, "s3://b/k")])
     i1 = _issue("i1", [_dep(DependencyKind.ISSUE_TERMINAL, "i2")])
     graph = DependencyGraph([i1, i2], _world())
     chain = graph.get_blocked_chain("i1")
@@ -65,8 +65,8 @@ def test_transitive_blocked_two_levels():
 
 
 def test_transitive_blocked_three_levels():
-    i3 = _issue("i3", [_dep(DependencyKind.S3_OBJECT, "s3://b/k")], state=ItemState.OPEN_ISSUE_BLOCKED)
-    i2 = _issue("i2", [_dep(DependencyKind.ISSUE_TERMINAL, "i3")], state=ItemState.OPEN_ISSUE_BLOCKED)
+    i3 = _issue("i3", [_dep(DependencyKind.S3_OBJECT, "s3://b/k")])
+    i2 = _issue("i2", [_dep(DependencyKind.ISSUE_TERMINAL, "i3")])
     i1 = _issue("i1", [_dep(DependencyKind.ISSUE_TERMINAL, "i2")])
     graph = DependencyGraph([i1, i2, i3], _world())
     chain = graph.get_blocked_chain("i1")
@@ -76,7 +76,7 @@ def test_transitive_blocked_three_levels():
 
 def test_transitive_not_blocked_when_target_terminal():
     """i1 depends on i2 being terminal; i2 is terminal → i1 not blocked."""
-    i2 = _issue("i2", state=ItemState.MERGED)
+    i2 = _issue("i2", stage=ItemStage.DONE)
     i1 = _issue("i1", [_dep(DependencyKind.ISSUE_TERMINAL, "i2")])
     world = ObservedWorld(terminal_items={"i2"})
     graph = DependencyGraph([i1, i2], world)
@@ -149,7 +149,7 @@ def test_blocked_items_lists_all_blocked():
 
 
 def test_directly_blocked_items():
-    i2 = _issue("i2", [_dep(DependencyKind.S3_OBJECT, "s3://b/k")], state=ItemState.OPEN_ISSUE_BLOCKED)
+    i2 = _issue("i2", [_dep(DependencyKind.S3_OBJECT, "s3://b/k")])
     i1 = _issue("i1", [_dep(DependencyKind.ISSUE_TERMINAL, "i2")])
     graph = DependencyGraph([i1, i2], _world())
     # Both are directly blocked: i1's issue_terminal dep is unsatisfied

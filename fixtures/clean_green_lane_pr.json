@@ -1,16 +1,18 @@
 {
-  "description": "A clean, green PR with a groom-reviewed lane label → ACT automerge",
+  "description": "An item in flight whose change is clean and green, carrying a groom-reviewed lane label → ACT automerge.",
   "items": [
     {
       "id": "p1",
-      "kind": "pr",
-      "state": "open_clean_green",
+      "stage": "in_flight",
       "title": "Fix scanner liquidity gate",
       "labels": ["groom-reviewed"],
-      "is_draft": false,
-      "mergeable": true,
-      "ci_green": true,
-      "security_threads": 0
+      "change": {
+        "ref": "p1",
+        "condition": "clean",
+        "mergeable": true,
+        "ci_green": true,
+        "security_threads": 0
+      }
     }
   ],
   "world": {
@@ -20,6 +22,6 @@
     "pipeline_runs": []
   },
   "expected": {
-    "p1": {"kind": "act", "action": "automerge"}
+    "p1": {"kind": "act", "action": "automerge", "stage": "in_flight"}
   }
 }

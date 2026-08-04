@@ -1,0 +1,55 @@
+{
+  "description": "alpha-engine-config#6307 closes-when 2. An item in flight whose change is conflicted receives ACT, never BLOCKED. A merge conflict is inside the loop's own write authority — a rebase resolves it this cycle with nothing in the world changing — so it is work, not a dependency (§3.5). c2 is the discriminating case: the SAME conflicted condition on an item that also rests on a real external dependency IS blocked, which proves the ACT above comes from the condition being self-resolvable rather than from conflicts being ignored. c3 shows the same conflict on an item whose declared condition is satisfied, so nothing external explains a park.",
+  "items": [
+    {
+      "id": "c1",
+      "stage": "in_flight",
+      "title": "Conflicted change, nothing declared",
+      "change": {
+        "ref": "c1",
+        "condition": "conflicted",
+        "mergeable": false,
+        "ci_green": true
+      }
+    },
+    {
+      "id": "c2",
+      "stage": "in_flight",
+      "title": "Conflicted change that also rests on an unsatisfied external condition",
+      "change": {
+        "ref": "c2",
+        "condition": "conflicted",
+        "mergeable": false,
+        "ci_green": true
+      },
+      "declared_dependencies": [
+        {"kind": "s3_object", "target": "s3://ne-artifacts/features/2026-08-04/panel.parquet"}
+      ]
+    },
+    {
+      "id": "c3",
+      "stage": "in_flight",
+      "title": "Conflicted change whose declared condition is satisfied",
+      "change": {
+        "ref": "c3",
+        "condition": "conflicted",
+        "mergeable": false,
+        "ci_green": true
+      },
+      "declared_dependencies": [
+        {"kind": "pipeline_run", "target": "ne-weekly-freshness-pipeline"}
+      ]
+    }
+  ],
+  "world": {
+    "s3_objects": [],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": ["ne-weekly-freshness-pipeline"]
+  },
+  "expected": {
+    "c1": {"kind": "act", "action": "resolve_conflicts", "stage": "in_flight"},
+    "c2": {"kind": "blocked", "stage": "in_flight"},
+    "c3": {"kind": "act", "action": "resolve_conflicts", "stage": "in_flight"}
+  }
+}

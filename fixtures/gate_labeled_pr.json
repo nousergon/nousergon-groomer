@@ -1,14 +1,17 @@
 {
-  "description": "A green PR carrying a gate:* label with NO declared dependency behind it → UNDECIDABLE. The label projects a status nothing declares (groom-sweep-policy §3.3), so neither branch is derivable: reading it as blocked asserts blocked-ness, reading its absence as clear is the 2026-07-22 incident. Critically, UNDECIDABLE also keeps it out of the auto-merge path — the PR is green, mergeable and carries the groom-reviewed lane label, so a core that resolved the unbacked projection in the permissive direction would merge it.",
+  "description": "An item in flight whose change is clean and green, carrying a gate:* label with NO declared dependency behind it → UNDECIDABLE. The label projects a status nothing declares (groom-sweep-policy §3.3), so neither branch is derivable: reading it as blocked asserts blocked-ness, reading its absence as clear is the 2026-07-22 incident. Critically, UNDECIDABLE also keeps it out of the auto-merge path — the change is green, mergeable and carries the groom-reviewed lane label, so a core that resolved the unbacked projection in the permissive direction would merge it.",
   "items": [
     {
       "id": "p1",
-      "kind": "pr",
-      "state": "open_clean_green",
-      "title": "Gated PR whose gate is a bare label",
+      "stage": "in_flight",
+      "title": "Gated item whose gate is a bare label",
       "labels": ["gate:weekly-sf", "groom-reviewed"],
-      "mergeable": true,
-      "ci_green": true
+      "change": {
+        "ref": "p1",
+        "condition": "clean",
+        "mergeable": true,
+        "ci_green": true
+      }
     }
   ],
   "world": {
@@ -18,6 +21,6 @@
     "pipeline_runs": []
   },
   "expected": {
-    "p1": {"kind": "undecidable"}
+    "p1": {"kind": "undecidable", "stage": "in_flight"}
   }
 }

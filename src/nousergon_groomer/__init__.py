@@ -4,7 +4,8 @@ The fixture-runnable control plane for the autonomous backlog-and-PR
 maintenance loop. Implements the properties specified in
 ``nous-ergon-ops/policies/groom-sweep-policy.md`` (the "groom-sweep policy"):
 
-- §3   — blocked-ness is derived from declared dependencies, never asserted
+- §3   — one item with stages, not issues and PRs as two populations;
+         blocked-ness is derived from declared dependencies, never asserted
 - §3.1 — dependencies are validated at the write boundary
 - §3.3 — spec (declaration) and status (evaluated disposition) are separate
 - §3.4 — dependencies compose transitively
@@ -39,15 +40,19 @@ from .github_executor import (
 from .github_snapshot import GitHubSnapshot, IssueFieldConformance, SnapshotError
 from .model_provider import ModelError, ModelProvider, OpenAICompatibleProvider
 from .models import (
+    STAGE_ORDER,
+    Change,
+    ChangeCondition,
     Dependency,
     DependencyEvaluation,
     DependencyKind,
     Disposition,
     DispositionKind,
     Item,
-    ItemKind,
-    ItemState,
+    ItemStage,
     ObservedGeneration,
+    VerificationObligation,
+    can_transition,
 )
 from .observed_gen import (
     GenerationStore,
@@ -55,6 +60,7 @@ from .observed_gen import (
     PersistentGenerationStore,
 )
 from .reconciler import Reconciler, ReconcilerConfig, ReconcilerResult
+from .stage import effective_stage
 
 __all__ = [
     "GateFamily",
@@ -63,11 +69,17 @@ __all__ = [
     "ModelConfig",
     "load_config",
     "write_default_config",
+    "STAGE_ORDER",
+    "Change",
+    "ChangeCondition",
     "Dependency",
     "DependencyEvaluation",
     "DependencyKind",
     "Disposition",
     "DispositionKind",
+    "VerificationObligation",
+    "can_transition",
+    "effective_stage",
     "GenerationStore",
     "GenerationStoreProtocol",
     "PersistentGenerationStore",
@@ -78,8 +90,7 @@ __all__ = [
     "GitHubSnapshot",
     "IssueFieldConformance",
     "Item",
-    "ItemKind",
-    "ItemState",
+    "ItemStage",
     "ModelError",
     "ModelProvider",
     "ObservedGeneration",
@@ -91,4 +102,4 @@ __all__ = [
     "ReconcilerResult",
 ]
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

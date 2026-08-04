@@ -1,14 +1,17 @@
 {
-  "description": "The migrated gated population (alpha-engine-config#6137): each item still carries the gate:* label its status was projected with, and every disposition is derived from declared dependencies evaluated against the observed world instead. p1's gate has cleared and it auto-merges without anyone editing the label; p2's has not and it blocks on the S3 key the gate actually named, not on the label that hid it; d1 is a draft whose gate cleared, so the loop advances it rather than resting on it.",
+  "description": "The migrated gated population (alpha-engine-config#6137): each item still carries the gate:* label its status was projected with, and every disposition is derived from declared dependencies evaluated against the observed world instead. p1's gate has cleared and it auto-merges without anyone editing the label; p2's has not and it blocks on the S3 key the gate actually named, not on the label that hid it; d1 is a draft whose gate cleared, so the loop advances it rather than resting on it. All three are one stage — in_flight — differing only in the condition of their change.",
   "items": [
     {
       "id": "p1",
-      "kind": "pr",
-      "state": "open_clean_green",
-      "title": "Green PR whose weekly-sf gate has cleared (label still attached)",
+      "stage": "in_flight",
+      "title": "Green change whose weekly-sf gate has cleared (label still attached)",
       "labels": ["gate:weekly-sf", "groom-reviewed"],
-      "mergeable": true,
-      "ci_green": true,
+      "change": {
+        "ref": "p1",
+        "condition": "clean",
+        "mergeable": true,
+        "ci_green": true
+      },
       "declared_dependencies": [
         {"kind": "pipeline_run", "target": "ne-weekly-freshness-pipeline"},
         {"kind": "s3_object", "target": "s3://ne-artifacts/weekly/2026-08-03/report.json"}
@@ -16,23 +19,28 @@
     },
     {
       "id": "p2",
-      "kind": "pr",
-      "state": "open_clean_green",
-      "title": "Green PR whose data gate has not cleared",
+      "stage": "in_flight",
+      "title": "Green change whose data gate has not cleared",
       "labels": ["gate:data", "groom-reviewed"],
-      "mergeable": true,
-      "ci_green": true,
+      "change": {
+        "ref": "p2",
+        "condition": "clean",
+        "mergeable": true,
+        "ci_green": true
+      },
       "declared_dependencies": [
         {"kind": "s3_object", "target": "s3://ne-artifacts/features/2026-08-04/panel.parquet"}
       ]
     },
     {
       "id": "d1",
-      "kind": "pr",
-      "state": "open_draft",
-      "title": "Draft PR whose weekly-sf gate has cleared",
+      "stage": "in_flight",
+      "title": "Draft change whose weekly-sf gate has cleared",
       "labels": ["gate:weekly-sf"],
-      "is_draft": true,
+      "change": {
+        "ref": "d1",
+        "condition": "draft"
+      },
       "declared_dependencies": [
         {"kind": "pipeline_run", "target": "ne-weekly-freshness-pipeline"}
       ]
@@ -45,8 +53,8 @@
     "pipeline_runs": ["ne-weekly-freshness-pipeline"]
   },
   "expected": {
-    "p1": {"kind": "act", "action": "automerge"},
-    "p2": {"kind": "blocked"},
-    "d1": {"kind": "act", "action": "advance_draft"}
+    "p1": {"kind": "act", "action": "automerge", "stage": "in_flight"},
+    "p2": {"kind": "blocked", "stage": "in_flight"},
+    "d1": {"kind": "act", "action": "advance_draft", "stage": "in_flight"}
   }
 }

@@ -10,6 +10,7 @@ that spec against the world.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import enum
 import hashlib
 import warnings
@@ -33,41 +34,109 @@ GATE_LABEL_PREFIX = "gate:"
 # ---------------------------------------------------------------------------
 
 
-class ItemKind(str, enum.Enum):
-    """The two carried item kinds. The reconciler enumerates both (§5.1)."""
+class ItemStage(str, enum.Enum):
+    """The stages one **unit of intended change** passes through (§3).
 
-    ISSUE = "issue"
-    PR = "pr"
+    There is one kind of item and it has stages. An issue and its pull request
+    are not two populations the loop maintains in parallel — they are the same
+    unit at two points in its life, and a pull request is the *rendering* of
+    the :attr:`IN_FLIGHT` stage rather than a thing with a lifecycle of its own.
 
+    Modelling one thing as two is the shared root of four separate defects the
+    policy addresses individually: a branch conflict — a property of the
+    in-flight stage — gets declared a dependency of the item and the item parks
+    (§3.5); "draft" becomes a place to leave things rather than a stage the
+    cycle must exit (§4.4); verification that can only happen after merge has
+    nowhere to live, so it is held as a pre-merge gate that can never clear
+    (§3.8); and the link between the two populations becomes something a sweep
+    checks rather than an invariant (§5.6).
 
-class ItemState(str, enum.Enum):
-    """Observed lifecycle states of a carried item.
+    Two of the six forward stages are **derived, never asserted**, and that is
+    load-bearing rather than an implementation convenience:
 
-    This enumeration is the **totality surface** for §5.1: the disposition
-    function must map every value here to exactly one disposition. An
-    uncovered state is a defect in the function, not an acceptable gap.
+    - :attr:`READY` is :attr:`PROPOSED` with no unsatisfied declared
+      dependency. Storing readiness as a field would be asserting blocked-ness,
+      which is precisely what §3 abolishes.
+    - :attr:`VERIFIED` is :attr:`MERGED` with the item's post-merge
+      verification obligation (§3.8) discharged.
 
-    The detailed states distinguish PR sub-states (green/red/dirty/draft/
-    pending) and issue sub-states (actionable/blocked/waiting) because the
-    disposition function's action depends on which — a red PR gets
-    "fix CI", a dirty PR gets "resolve conflicts", a green PR gets
-    "automerge or human review". Collapsing these into a single ``OPEN``
-    would force the disposition function to re-derive the sub-state from
-    other fields, which is exactly the §1.1 defect (mechanism leaking
-    into the spec).
+    :func:`stage.effective_stage` computes both from the recorded stage and an
+    observed world; :attr:`ABANDONED` is reachable from any stage.
     """
 
-    OPEN_CLEAN_GREEN = "open_clean_green"
-    OPEN_RED_CI = "open_red_ci"
-    OPEN_DIRTY = "open_dirty"
-    OPEN_DRAFT = "open_draft"
-    OPEN_PENDING_CI = "open_pending_ci"
-    OPEN_ISSUE_ACTIONABLE = "open_issue_actionable"
-    OPEN_ISSUE_BLOCKED = "open_issue_blocked"
-    OPEN_ISSUE_WAITING = "open_issue_waiting"
+    PROPOSED = "proposed"
+    READY = "ready"
+    IN_FLIGHT = "in_flight"
     MERGED = "merged"
-    CLOSED = "closed"
-    DO_NOT_GROOM = "do_not_groom"
+    VERIFIED = "verified"
+    DONE = "done"
+    ABANDONED = "abandoned"
+
+    @property
+    def is_terminal(self) -> bool:
+        """True only for :attr:`DONE` and :attr:`ABANDONED`.
+
+        **:attr:`MERGED` is deliberately not terminal** (§3.8). Terminal-at-merge
+        is what leaves a post-merge verification obligation with nowhere to
+        live, and F7 measures lead time to ``verified``, not to ``merged``.
+        """
+        return self in _TERMINAL_STAGES
+
+
+#: The forward progression. ``ABANDONED`` is deliberately absent: it is
+#: reachable from any stage rather than being a point on the line.
+STAGE_ORDER: tuple[ItemStage, ...] = (
+    ItemStage.PROPOSED,
+    ItemStage.READY,
+    ItemStage.IN_FLIGHT,
+    ItemStage.MERGED,
+    ItemStage.VERIFIED,
+    ItemStage.DONE,
+)
+
+_TERMINAL_STAGES = frozenset({ItemStage.DONE, ItemStage.ABANDONED})
+
+
+def can_transition(current: ItemStage, following: ItemStage) -> bool:
+    """True iff ``current`` → ``following`` is a legal stage transition (§3).
+
+    Forward along :data:`STAGE_ORDER`, or to :attr:`ItemStage.ABANDONED` from
+    anywhere. Nothing leaves a terminal stage, and a stage never transitions to
+    itself (that is residence, not a transition).
+
+    Skipping forward is legal: an item whose change needs no post-merge
+    verification goes ``merged`` → ``verified`` with nothing in between, and a
+    harness that only ever observes an already-merged, already-closed item
+    records ``done`` without having witnessed the intermediate stages.
+    """
+    if current is following:
+        return False
+    if current.is_terminal:
+        return False
+    if following is ItemStage.ABANDONED:
+        return True
+    return STAGE_ORDER.index(following) > STAGE_ORDER.index(current)
+
+
+class ChangeCondition(str, enum.Enum):
+    """The observed condition of the change rendering the in-flight stage.
+
+    These are the pull-request sub-states of the pre-0.9.0 flat ``ItemState``,
+    demoted from item states to **conditions of one stage**. The distinction is
+    the whole point of §3: a conflicted change is not a state the item rests in
+    — the item is ``in_flight`` and its condition is ``conflicted``, and the
+    disposition is ``ACT`` because resolving it is inside the loop's own write
+    authority (§3.5). The same holds for :attr:`CI_RED` and :attr:`DRAFT`.
+
+    :attr:`CI_PENDING` is the one condition the loop cannot act out of, because
+    the only thing that resolves it is time passing on a check it does not own.
+    """
+
+    DRAFT = "draft"
+    CONFLICTED = "conflicted"
+    CI_RED = "ci_red"
+    CI_PENDING = "ci_pending"
+    CLEAN = "clean"
 
 
 class DependencyKind(str, enum.Enum):
@@ -90,7 +159,7 @@ class DependencyKind(str, enum.Enum):
 class DispositionKind(str, enum.Enum):
     """The four dispositions the reconciler may emit for an item (§5.1).
 
-    Exactly one of these is produced for every ``ItemState``. ``ACT`` carries
+    Exactly one of these is produced for every ``ItemStage``. ``ACT`` carries
     a concrete action; ``BLOCKED`` names the blocking chain; ``TERMINAL`` is
     final; ``UNDECIDABLE`` requires a reason and is never silently coerced.
     """
@@ -126,6 +195,108 @@ class Dependency(BaseModel):
             raise ValueError(
                 "Dependency.target must be a non-empty string (§3.1: "
                 "dependencies are validated at the write boundary)"
+            )
+        return v
+
+
+class Change(BaseModel):
+    """The change rendering an item's :attr:`ItemStage.IN_FLIGHT` stage (§3).
+
+    A pull request, in the fleet's substrate. It is **not** an item: it has no
+    stages of its own, no dispositions are defined over it, and no outcome is
+    measured over it. What it carries is the observed *condition* of the work
+    in flight, which the disposition function reads to decide which action the
+    item needs next.
+
+    ``mergeable`` and ``ci_green`` are three-valued on purpose: ``None`` means
+    "the substrate has not reported a value", which the lane classifier treats
+    as a failed cleanliness check rather than as a pass. Absence of evidence is
+    never confirmation of cleanliness.
+    """
+
+    #: The change's identifier in the substrate — a PR number, typically
+    #: qualified (``owner/name#number``) by a fleet-wide harness.
+    ref: str
+    condition: ChangeCondition
+    mergeable: Optional[bool] = None
+    ci_green: Optional[bool] = None
+    security_threads: int = 0
+    head_sha: Optional[str] = None
+
+    @field_validator("ref")
+    @classmethod
+    def _ref_nonempty(cls, v: str) -> str:
+        if v is None or not str(v).strip():
+            raise ValueError(
+                "Change.ref must be a non-empty string — a change with no "
+                "identifier cannot be acted on or reported"
+            )
+        return v
+
+    @property
+    def is_draft(self) -> bool:
+        """True iff the change is a draft.
+
+        Derived from :attr:`condition` rather than stored beside it. A separate
+        boolean would be a second surface for the same fact, and the two can
+        disagree; draft-ness is a condition like any other (§4.4).
+        """
+        return self.condition is ChangeCondition.DRAFT
+
+
+class VerificationObligation(BaseModel):
+    """A criterion satisfiable only **after** the change is merged (§3.8).
+
+    A change whose acceptance criterion is an artifact its own merged code
+    produces cannot satisfy that criterion before merging. Held as a pre-merge
+    dependency it is structurally unsatisfiable — the item rests forever on a
+    condition its own resting prevents.
+
+    So it is not a dependency. It is an obligation attached to the
+    ``merged`` → ``verified`` transition: the item merges when the change is
+    correct and reviewable, advances to ``verified`` when ``predicate`` holds,
+    and carries :attr:`revert_action` as the action if the predicate has not
+    held by :attr:`deadline`.
+
+    The deadline is **required**, not optional (§3.6): a wait with no deadline
+    is a wontfix with better manners, and an unverified obligation past its
+    deadline is an F6 residence violation and an F4 candidate. Rejecting the
+    declaration here is the §3.1 write-boundary chokepoint doing its job.
+    """
+
+    predicate: Dependency
+    #: ISO-8601 date (``YYYY-MM-DD``) by which ``predicate`` must hold.
+    deadline: str
+    #: The ACT action emitted when the deadline passes with the predicate
+    #: unsatisfied. Named on the obligation rather than hardcoded so a harness
+    #: can route it (§3.8 requires a *named* revert, not an alert).
+    revert_action: str = "revert"
+
+    @field_validator("deadline")
+    @classmethod
+    def _deadline_is_a_date(cls, v: str) -> str:
+        if v is None or not str(v).strip():
+            raise ValueError(
+                "VerificationObligation.deadline is required (§3.6: absence of "
+                "a stated residence is a rejected declaration, not a default "
+                "of forever)"
+            )
+        try:
+            _dt.date.fromisoformat(str(v).strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"VerificationObligation.deadline {v!r} is not an ISO-8601 date "
+                f"(YYYY-MM-DD): {exc}"
+            ) from exc
+        return str(v).strip()
+
+    @field_validator("revert_action")
+    @classmethod
+    def _revert_action_nonempty(cls, v: str) -> str:
+        if v is None or not str(v).strip():
+            raise ValueError(
+                "VerificationObligation.revert_action must be a non-empty "
+                "action name (§3.8: the failure path is a named revert)"
             )
         return v
 
@@ -232,6 +403,35 @@ class ObservedGeneration(BaseModel):
     #: measurement instead of declining to make one.
     satisfied_tokens: list[str] = Field(default_factory=list)
 
+    #: The item's **effective** stage at this evaluation (:class:`ItemStage`
+    #: value). Recorded so the next cycle can compute the *transition* rather
+    #: than the state, exactly as ``satisfied_tokens`` does for dependencies.
+    stage: Optional[str] = None
+
+    #: :class:`ItemStage` value → ISO-8601 timestamp at which the item was
+    #: **first observed** in that stage (§3, deliverable 4).
+    #:
+    #: **F7 and F6 are computed from this map and from nothing else.** F7 is
+    #: lead time from intent recorded to change verified —
+    #: ``stage_entered_at["verified"] - stage_entered_at["proposed"]`` — and F6
+    #: is residence, measured from the entry stamp of the stage an item is
+    #: currently in. Neither is recoverable from GitHub: the substrate records
+    #: when an issue was opened and when a PR merged, and nothing anywhere
+    #: records when an item became *ready*, because readiness is derived and
+    #: only the loop that derives it can know the moment it flipped.
+    #:
+    #: **First entry wins, and re-entry never re-stamps.** An item can regress
+    #: — a closed PR sends it from ``in_flight`` back to ``ready`` — and lead
+    #: time is measured from the *original* intent, not from the most recent
+    #: attempt. Re-stamping would silently shorten every measurement that had a
+    #: setback, which is the population the number exists to expose.
+    #:
+    #: Timestamps are supplied by the caller for the same reason
+    #: ``dependency_satisfied_at``'s are: the reconciler is a pure function of
+    #: ``(config, items, world, store)`` (§5.4), and a hidden clock would make
+    #: two identical inputs produce different records.
+    stage_entered_at: dict[str, str] = Field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Disposition (§5.1) — the reconciler's verdict
@@ -281,7 +481,13 @@ def _hash_string(value: str) -> str:
 
 
 class Item(BaseModel):
-    """A carried backlog item (issue or PR) as recorded from GitHub.
+    """One carried **unit of intended change**, at a stage (§3).
+
+    There is exactly one item type. What used to be two — an issue and its pull
+    request, carried as separate populations with a foreign key between them —
+    is one item whose :attr:`stage` says where in its life it is, and whose
+    :attr:`change` describes the pull request rendering the ``in_flight`` stage
+    when it has one.
 
     Per §3, an ``Item`` carries its *declared* dependencies
     (:attr:`declared_dependencies`) and never an asserted ``blocked`` flag —
@@ -289,24 +495,52 @@ class Item(BaseModel):
     against an :class:`ObservedWorld`. Per §5.5, an item may carry its last
     observed generation so the reconciler can skip unchanged items.
 
-    Fields describing GitHub-side mergeability (``mergeable``, ``ci_green``,
-    ``security_threads``) are observed facts recorded by the private harness
-    when snapshotting; ``None`` means "GitHub has not reported a value yet",
-    which the lane classifier treats as a failed Gate A check (cannot confirm
-    clean) rather than as a pass.
+    Two stages are likewise derived rather than stored (see :class:`ItemStage`):
+    a recorded ``proposed`` resolves to ``ready`` when nothing it declares is
+    unsatisfied, and a recorded ``merged`` resolves to ``verified`` when its
+    :attr:`verification` obligation is discharged. Use
+    :func:`stage.effective_stage`, never :attr:`stage`, to ask where an item
+    actually is.
     """
 
     id: str
-    kind: ItemKind
-    state: ItemState
+    stage: ItemStage
     title: str = ""
     labels: list[str] = []
     declared_dependencies: list[Dependency] = []
-    is_draft: bool = False
+
+    #: The change rendering this item's ``in_flight`` stage, when this item is
+    #: the one carrying it. ``None`` at every stage before ``in_flight``, and
+    #: also on an item whose change is enumerated as a *separate* record — see
+    #: :attr:`change_ref`.
+    change: Optional[Change] = None
+
+    #: The identifier of this item's change, even when :attr:`change` itself is
+    #: not carried here.
+    #:
+    #: This exists because the substrate still hands the loop an issue and its
+    #: pull request as two API objects, and a harness that enumerates both
+    #: produces two records for one unit. Rather than let that reintroduce two
+    #: populations, the issue-side record is ``in_flight`` with a
+    #: ``change_ref`` and no ``change``: it is the same item, and the
+    #: disposition function says so — it defers to the record that actually
+    #: carries the change instead of inventing a second verdict about it.
+    change_ref: Optional[str] = None
+
+    #: The §3.8 post-merge verification obligation, when the item's acceptance
+    #: criterion cannot be satisfied before merging. Its presence is what makes
+    #: ``merged`` a stage the item can rest in rather than pass straight
+    #: through; its absence means merging *is* verification.
+    verification: Optional[VerificationObligation] = None
+
     human_owned: bool = False
-    mergeable: Optional[bool] = None
-    ci_green: Optional[bool] = None
-    security_threads: int = 0
+
+    #: Declared exclusion from the loop entirely (§9 carve-out 2). Not a stage:
+    #: an excluded item has not been abandoned and may be at any point in its
+    #: life — the loop simply does not act on it. Modelling it as a stage would
+    #: destroy the stage it was actually in.
+    do_not_groom: bool = False
+
     observed_generation: Optional[ObservedGeneration] = None
 
     #: Org-level issue-field values observed on this item (config#6320
@@ -330,12 +564,49 @@ class Item(BaseModel):
     #: feeds whichever consumer implements §3.4's epic-progress semantics.
     sub_issue_ids: list[str] = []
 
+    # -- write-boundary invariants (§3.1) ----------------------------------
+
+    @model_validator(mode="after")
+    def _check_stage_invariants(self) -> Item:
+        """Reject item shapes the stage model makes meaningless.
+
+        Validated here, at construction, rather than discovered by a sweep: an
+        item whose stage and change contradict each other is unevaluable, and
+        §3.1 makes that a rejected write rather than a population to repair.
+        """
+        if self.change is not None and self.change_ref is None:
+            self.change_ref = self.change.ref
+        if self.stage is ItemStage.IN_FLIGHT and self.change is None and self.change_ref is None:
+            raise ValueError(
+                f"Item {self.id!r} is at stage in_flight with neither a change "
+                "nor a change_ref — 'in flight' means a change exists (§3), so "
+                "an item claiming it must name one"
+            )
+        if self.change is not None and self.stage in (ItemStage.PROPOSED, ItemStage.READY):
+            raise ValueError(
+                f"Item {self.id!r} carries a change at stage {self.stage.value} — "
+                "a change existing IS the in_flight stage (§3); an item cannot "
+                "be pre-change and carry one"
+            )
+        return self
+
     # -- derived properties ------------------------------------------------
 
     @property
     def is_terminal(self) -> bool:
-        """True if the item is in a final state (CLOSED, MERGED, or DO_NOT_GROOM)."""
-        return self.state in (ItemState.CLOSED, ItemState.MERGED, ItemState.DO_NOT_GROOM)
+        """True iff the item's stage is terminal (``done`` or ``abandoned``).
+
+        Note what is **not** here: ``merged`` (§3.8 gives it a successor
+        stage), and ``do_not_groom`` (an exclusion, not a stage — the
+        disposition function surfaces it separately so the item's real stage
+        survives).
+        """
+        return self.stage.is_terminal
+
+    @property
+    def carries_change(self) -> bool:
+        """True iff this record carries the change itself, not just a ref."""
+        return self.change is not None
 
     @property
     def has_declared_dependency(self) -> bool:

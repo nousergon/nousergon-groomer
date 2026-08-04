@@ -34,8 +34,9 @@ from .admission import AdmissionController
 from .dependency_evaluator import ObservedWorld
 from .dependency_graph import DependencyGraph
 from .disposition import compute_disposition
-from .models import Disposition, DispositionKind, Item, ItemKind
+from .models import Disposition, DispositionKind, Item, ItemStage
 from .observed_gen import GenerationStoreProtocol, record_evaluation, should_skip
+from .stage import effective_stage
 
 __all__ = [
     "ReconcilerConfig",
@@ -76,10 +77,19 @@ class ReconcilerConfig(BaseModel):
 
 
 class ItemDisposition(BaseModel):
-    """The disposition for one item, plus skip and admission metadata."""
+    """The disposition for one item, plus its stage, skip and admission metadata."""
 
     item_id: str
     disposition: Disposition
+
+    #: The item's **effective** stage this cycle (§3) — where it actually is,
+    #: not what the harness recorded. Emitted because a disposition alone
+    #: cannot be routed: ``TERMINAL`` means something different at ``verified``
+    #: than at ``in_flight``, and a consumer forced to re-derive the stage
+    #: would be re-deriving it from fields the core deliberately made
+    #: insufficient.
+    stage: ItemStage = ItemStage.PROPOSED
+
     skipped: bool = False  # §5.5: was this item skipped (inputs unchanged)?
     admission_reason: Optional[str] = None  # set when admission downgraded ACT
 
@@ -104,6 +114,15 @@ class ReconcilerResult(BaseModel):
     admitted: int  # ACT-create-PR dispositions that passed admission
     admission_denied: int  # ACT-create-PR dispositions downgraded by admission
 
+    #: :class:`ItemStage` value → number of items at that effective stage this
+    #: cycle. F6 is the share of the open population resting on a declared
+    #: dependency and how long it rests; this is the denominator, emitted every
+    #: cycle so the distribution is observable rather than reconstructable.
+    #: A stage with no items is present with a count of zero — a missing key
+    #: and a zero are different claims, and only one of them is honest about a
+    #: stage nothing ever reaches.
+    stage_counts: dict[str, int] = {}
+
     @property
     def throughput(self) -> int:
         """The single throughput number: items acted on this pass (§7)."""
@@ -119,6 +138,10 @@ class ReconcilerResult(BaseModel):
 # choice, not a mechanical fact; it lives here so it is auditable in one
 # place.
 _ACTION_PRIORITY = {
+    # A merged change whose post-merge verification did not hold by its
+    # deadline (§3.8) outranks everything: it is the one action about code
+    # already live in production, and it is an F4 change-failure event.
+    "revert": -1,
     "fix_ci": 0,           # red CI blocks the whole lane — fix first
     "resolve_conflicts": 1,  # a dirty PR blocks its successors — resolve next
     "advance_draft": 2,    # a stale draft wastes a WIP slot — author forward
@@ -196,6 +219,15 @@ class Reconciler:
             # that would skip precisely the items that must be re-derived.
             closure_state = graph.closure_state(item.id)
 
+            # Where the item actually is (§3). Computed for every item,
+            # skipped ones included: the stage is what the store stamps entry
+            # timestamps against, and F7's lead time is the difference between
+            # two of those stamps. An item skipped for a hundred cycles must
+            # still have the cycle that *did* move it recorded — and a skipped
+            # item's stage is unchanged by definition, so this costs a graph
+            # lookup already performed above.
+            stage = effective_stage(item, graph, world)
+
             skipped = should_skip(
                 item,
                 store,
@@ -228,19 +260,20 @@ class Reconciler:
                 generation=self._config.generation,
                 closure_state=closure_state,
                 disposition=disposition,
+                stage=stage,
                 observed_at=self._config.observed_at,
             )
 
             # Admission gate: an ACT-create-PR disposition is downgraded to
-            # BLOCKED if the WIP ceiling is saturated (§4). The issue is
+            # BLOCKED if the WIP ceiling is saturated (§4). The item is
             # unblocked but the queue is full — that is a queue constraint,
-            # not an issue dependency, so it is surfaced as BLOCKED with a
+            # not an item dependency, so it is surfaced as BLOCKED with a
             # clear reason rather than silently dropped.
             admission_reason: Optional[str] = None
             if (
                 disposition.kind is DispositionKind.ACT
                 and disposition.action == "create_pr"
-                and item.kind is ItemKind.ISSUE
+                and item.change is None
             ):
                 decision = self._admission.can_admit(item, items, world)
                 if not decision.admitted:
@@ -254,6 +287,7 @@ class Reconciler:
                 ItemDisposition(
                     item_id=item.id,
                     disposition=disposition,
+                    stage=stage,
                     skipped=skipped,
                     admission_reason=admission_reason,
                 )
@@ -277,8 +311,13 @@ class Reconciler:
         """Tally aggregate counts and assemble the result (§7)."""
         acted = blocked = terminal = undecidable = skipped = 0
         admitted = admission_denied = 0
+        # Seeded with every stage at zero: a stage absent from the map and a
+        # stage with no items are different claims, and only the second is
+        # true. §6.2 — nothing emitted is unobserved, never healthy.
+        stage_counts: dict[str, int] = {stage.value: 0 for stage in ItemStage}
 
         for r in results:
+            stage_counts[r.stage.value] += 1
             if r.skipped:
                 skipped += 1
             kind = r.disposition.kind
@@ -306,6 +345,7 @@ class Reconciler:
             skipped=skipped,
             admitted=admitted,
             admission_denied=admission_denied,
+            stage_counts=stage_counts,
         )
 
     @staticmethod

@@ -1,10 +1,9 @@
 {
-  "description": "Transitive blocked: i1 depends on i2 being terminal; i2 is blocked on s3 → i1 BLOCKED naming the root cause",
+  "description": "Transitive blocked: i1 depends on i2 reaching a terminal stage; i2 rests on an S3 key → i1 BLOCKED naming the root cause, not the intermediate item. Both stay at `proposed`, because neither has been shown ready.",
   "items": [
     {
       "id": "i1",
-      "kind": "issue",
-      "state": "open_issue_actionable",
+      "stage": "proposed",
       "title": "Depends on i2",
       "declared_dependencies": [
         {"kind": "issue_terminal", "target": "i2"}
@@ -12,8 +11,7 @@
     },
     {
       "id": "i2",
-      "kind": "issue",
-      "state": "open_issue_blocked",
+      "stage": "proposed",
       "title": "Blocked on S3",
       "declared_dependencies": [
         {"kind": "s3_object", "target": "s3://bucket/key"}
@@ -27,7 +25,7 @@
     "pipeline_runs": []
   },
   "expected": {
-    "i1": {"kind": "blocked"},
-    "i2": {"kind": "blocked"}
+    "i1": {"kind": "blocked", "stage": "proposed"},
+    "i2": {"kind": "blocked", "stage": "proposed"}
   }
 }

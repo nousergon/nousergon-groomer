@@ -16,8 +16,8 @@ from .observed_gen import GenerationStore
 from .reconciler import Reconciler, ReconcilerConfig, ReconcilerResult
 
 _COL_ID = 12
-_COL_KIND = 8
-_COL_STATE = 25
+_COL_STAGE = 12
+_COL_CHANGE = 14
 _COL_DISPOSITION = 13
 _COL_ACTION = 16
 
@@ -61,12 +61,17 @@ def format_dry_run_table(
     items: list[Item],
     result: ReconcilerResult,
 ) -> str:
-    """Render reconciler dispositions as a human-readable table."""
+    """Render reconciler dispositions as a human-readable table.
+
+    STAGE is the item's **effective** stage as the reconciler resolved it — a
+    recorded ``proposed`` shows as ``ready`` once nothing blocks it — so the
+    table shows where each item is rather than what a harness wrote down.
+    """
     item_by_id = {item.id: item for item in items}
     header = (
         f"{'ID':<{_COL_ID}}"
-        f"{'KIND':<{_COL_KIND}}"
-        f"{'STATE':<{_COL_STATE}}"
+        f"{'STAGE':<{_COL_STAGE}}"
+        f"{'CHANGE':<{_COL_CHANGE}}"
         f"{'DISPOSITION':<{_COL_DISPOSITION}}"
         f"{'ACTION':<{_COL_ACTION}}"
         "REASON"
@@ -74,15 +79,20 @@ def format_dry_run_table(
     lines = [header]
     for item_disp in result.items:
         item = item_by_id.get(item_disp.item_id)
-        kind = item.kind.value if item is not None else "?"
-        state = item.state.value if item is not None else "?"
+        stage = item_disp.stage.value
+        if item is None:
+            change = "?"
+        elif item.change is not None:
+            change = item.change.condition.value
+        else:
+            change = "—"
         disposition = item_disp.disposition
         action = disposition.action if disposition.action else "—"
         reason = disposition.reason if disposition.reason else "—"
         lines.append(
             f"{item_disp.item_id:<{_COL_ID}}"
-            f"{kind:<{_COL_KIND}}"
-            f"{state:<{_COL_STATE}}"
+            f"{stage:<{_COL_STAGE}}"
+            f"{change:<{_COL_CHANGE}}"
             f"{disposition.kind.name:<{_COL_DISPOSITION}}"
             f"{action:<{_COL_ACTION}}"
             f"{reason}"

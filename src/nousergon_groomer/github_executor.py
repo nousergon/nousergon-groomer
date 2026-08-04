@@ -15,7 +15,7 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from .model_provider import ModelProvider
-from .models import DispositionKind, Item, ItemKind
+from .models import DispositionKind, Item
 from .reconciler import ReconcilerResult
 
 _API_BASE = "https://api.github.com"
@@ -182,18 +182,35 @@ class GitHubExecutor:
             raise ValueError(f"unknown ACT action: {action!r}")
         handler(item, repo)
 
+    @staticmethod
+    def _require_change(item: Item, action: str) -> str:
+        """The ref of the change this action operates on, or a loud failure.
+
+        Actions on a change are scoped to the ``in_flight`` stage (§3): an item
+        with no change has nothing for them to act on, and acting on the
+        item id instead would be guessing at a pull-request number.
+        """
+        if item.change is None:
+            raise ValueError(
+                f"{action} requires an item carrying a change; item {item.id!r} "
+                f"is at stage {item.stage.value} with none"
+            )
+        return item.change.ref
+
     def _automerge(self, item: Item, repo: str) -> None:
-        if item.kind is not ItemKind.PR:
-            raise ValueError(f"automerge requires a PR item, got {item.kind.value}")
+        ref = self._require_change(item, "automerge")
         response = self._client.put(
-            f"/repos/{repo}/pulls/{item.id}/merge",
+            f"/repos/{repo}/pulls/{ref}/merge",
             json={"merge_method": "squash"},
         )
-        self._raise_for_response(response, f"merge PR #{item.id}")
+        self._raise_for_response(response, f"merge PR #{ref}")
 
     def _create_pr(self, item: Item, repo: str) -> None:
-        if item.kind is not ItemKind.ISSUE:
-            raise ValueError(f"create_pr requires an issue item, got {item.kind.value}")
+        if item.change is not None:
+            raise ValueError(
+                f"create_pr requires an item with no change yet; item {item.id!r} "
+                f"already carries change {item.change.ref!r}"
+            )
         body = ""
         if self._model_provider is not None:
             prompt = (
@@ -215,8 +232,7 @@ class GitHubExecutor:
         self._raise_for_response(response, f"create PR for issue #{item.id}")
 
     def _fix_ci(self, item: Item, repo: str) -> None:
-        if item.kind is not ItemKind.PR:
-            raise ValueError(f"fix_ci requires a PR item, got {item.kind.value}")
+        self._require_change(item, "fix_ci")
         context = self._fetch_pr_context(item, repo)
         ci_log = self._fetch_ci_log(item, repo)
         prompt = (
@@ -230,8 +246,7 @@ class GitHubExecutor:
         self._push_commit(item, repo, fix_message)
 
     def _resolve_conflicts(self, item: Item, repo: str) -> None:
-        if item.kind is not ItemKind.PR:
-            raise ValueError(f"resolve_conflicts requires a PR item, got {item.kind.value}")
+        self._require_change(item, "resolve_conflicts")
         context = self._fetch_pr_context(item, repo)
         prompt = (
             f"Resolve merge conflicts for PR #{item.id} in {repo}.\n\n"
@@ -244,8 +259,7 @@ class GitHubExecutor:
         self._push_commit(item, repo, resolution_message)
 
     def _advance_draft(self, item: Item, repo: str) -> None:
-        if item.kind is not ItemKind.PR:
-            raise ValueError(f"advance_draft requires a PR item, got {item.kind.value}")
+        self._require_change(item, "advance_draft")
         prompt = (
             f"Review draft PR #{item.id} titled {item.title!r} with labels "
             f"{item.labels}. Recommend label hygiene or whether to mark ready. "

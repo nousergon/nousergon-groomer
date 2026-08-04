@@ -1,0 +1,39 @@
+{
+  "description": "The substrate hands the loop an issue and its pull request as two API objects; §3 says they are one unit of intended change. i1 is the intent record, at in_flight because a change exists, carrying only the ref; p1 is the record holding the change. One unit gets one verdict, and it belongs to the record holding the change — i1 defers instead of inventing a second opinion about the same work. WIP is charged once, not twice: with a ceiling of 1 and one unit in flight, i2 is held.",
+  "config": {"wip_ceiling": 1},
+  "items": [
+    {
+      "id": "i1",
+      "stage": "in_flight",
+      "title": "Intent record whose change is enumerated separately",
+      "change_ref": "p1"
+    },
+    {
+      "id": "p1",
+      "stage": "in_flight",
+      "title": "The change rendering i1's in_flight stage",
+      "change": {
+        "ref": "p1",
+        "condition": "ci_red",
+        "mergeable": true,
+        "ci_green": false
+      }
+    },
+    {
+      "id": "i2",
+      "stage": "proposed",
+      "title": "A second item, held at the ceiling"
+    }
+  ],
+  "world": {
+    "s3_objects": [],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": []
+  },
+  "expected": {
+    "i1": {"kind": "terminal", "stage": "in_flight"},
+    "p1": {"kind": "act", "action": "fix_ci", "stage": "in_flight"},
+    "i2": {"kind": "blocked", "stage": "ready"}
+  }
+}

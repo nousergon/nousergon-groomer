@@ -6,17 +6,22 @@ only for an issue that is unblocked (§4.3). This module is pure logic over
 recorded state — it does not open PRs; it returns a decision the private
 harness acts on.
 
-§4.2 charging: every carried PR that is open and not terminal counts
-against the ceiling — drafts, blocked PRs, and PRs in review are all
-charged, because they all occupy a reviewer/CI slot. Closed and merged PRs
-are terminal and do not count.
+§4.2 charging: **every item in flight is charged, with no exemption class** —
+a draft, a conflicted change and a change in review all occupy the same slot.
+The ceiling is a count of items at the ``in_flight`` stage, which is what makes
+§2.2 ("closing a change is a success") economically true rather than merely
+stated: the fleet accumulated 116 drafts because nothing counted them.
+
+The rules here are defined over items scoped to a stage, never over pull
+requests (§3's Forbids). That is not a rename: it is why an item whose change
+is a draft cannot slip the charge by being "not really open yet".
 """
 from __future__ import annotations
 
 from pydantic import BaseModel
 
 from .dependency_evaluator import ObservedWorld, is_item_blocked
-from .models import Item, ItemKind, ItemState
+from .models import Item, ItemStage
 
 
 class AdmissionDecision(BaseModel):
@@ -52,31 +57,27 @@ class AdmissionController:
 
     # -- §4.2: WIP accounting ----------------------------------------------
 
-    # All non-terminal PR states that count toward WIP. A PR in any of these
-    # states occupies a reviewer/CI slot and is charged (§4.2).
-    _WIP_PR_STATES = frozenset(
-        {
-            ItemState.OPEN_CLEAN_GREEN,
-            ItemState.OPEN_RED_CI,
-            ItemState.OPEN_DIRTY,
-            ItemState.OPEN_DRAFT,
-            ItemState.OPEN_PENDING_CI,
-        }
-    )
-
     @staticmethod
     def current_wip(items: list[Item]) -> int:
-        """Count open, non-terminal PRs — every carried in-flight PR (§4.2).
+        """Count items at the ``in_flight`` stage carrying a change (§4.2).
 
-        A PR counts iff it is a PR and its state is one of the open, non-
-        terminal PR states. ``CLOSED``, ``MERGED``, and ``DO_NOT_GROOM`` are
-        terminal and do not count. Issues never count toward WIP (they do
-        not occupy a merge slot).
+        One condition, no enumeration of exempt sub-states: the whole point of
+        §3's one-item model is that "is a change in flight for this item?" has
+        a single answer. Every condition a change can be in — draft,
+        conflicted, red, pending, clean — is charged identically, because each
+        occupies the same reviewer/CI slot and each decays against a moving
+        ``main`` at the same rate.
+
+        Items before ``in_flight`` are not charged (no change exists yet), and
+        ``merged`` / ``verified`` / ``done`` / ``abandoned`` are past it. An
+        item at ``in_flight`` that only carries a ``change_ref`` — the
+        issue-side twin of a separately-enumerated change — is deliberately
+        **not** counted, so one unit of work is charged once rather than twice.
         """
         return sum(
             1
             for item in items
-            if item.kind is ItemKind.PR and item.state in AdmissionController._WIP_PR_STATES
+            if item.stage is ItemStage.IN_FLIGHT and item.change is not None
         )
 
     def at_ceiling(self, items: list[Item]) -> bool:
@@ -85,19 +86,25 @@ class AdmissionController:
 
     # -- §4.3: admission gate ---------------------------------------------
 
+    #: The stages a change may be opened *from*. ``ready`` is the commitment
+    #: point; ``proposed`` is included because readiness is derived, not
+    #: stored — gate 3 below is what separates them, and duplicating that
+    #: derivation here would create two answers to one question.
+    _ADMISSIBLE_STAGES = frozenset({ItemStage.PROPOSED, ItemStage.READY})
+
     def can_admit(
-        self, issue: Item, items: list[Item], world: ObservedWorld
+        self, item: Item, items: list[Item], world: ObservedWorld
     ) -> AdmissionDecision:
-        """Decide whether ``issue`` may be admitted (a PR opened for it).
+        """Decide whether ``item`` may be admitted (a change opened for it).
 
         Three gates, checked in order; the first failing gate denies and
         names itself in ``reason``:
 
-        1. **Actionable & open** — ``issue`` must be an ``OPEN_ISSUE_ACTIONABLE``
-           issue. A PR, a closed issue, a blocked issue, or a waiting issue
-           cannot be admitted.
+        1. **Pre-change stage** — the item must be at ``proposed`` / ``ready``
+           and not already carrying a change. An item at any later stage has
+           already been admitted.
         2. **WIP not saturated** (§4.1) — the ceiling must not be reached.
-        3. **No unsatisfied dependencies** (§4.3) — the issue must not be
+        3. **No unsatisfied dependencies** (§4.3) — the item must not be
            blocked by any of its declared dependencies against ``world``.
            An undecidable dependency does *not* deny admission here (it is
            not a definite blocker); the reconciler surfaces undecidability
@@ -105,15 +112,18 @@ class AdmissionController:
         """
         wip = self.current_wip(items)
 
-        # Gate 1: actionable & open issue.
-        if issue.kind is not ItemKind.ISSUE:
-            return AdmissionDecision(
-                admitted=False, reason="not an issue", wip=wip, ceiling=self.wip_ceiling
-            )
-        if issue.state is not ItemState.OPEN_ISSUE_ACTIONABLE:
+        # Gate 1: the item is at a pre-change stage.
+        if item.carries_change:
             return AdmissionDecision(
                 admitted=False,
-                reason=f"issue not actionable (state={issue.state.value})",
+                reason="item already carries a change",
+                wip=wip,
+                ceiling=self.wip_ceiling,
+            )
+        if item.stage not in self._ADMISSIBLE_STAGES:
+            return AdmissionDecision(
+                admitted=False,
+                reason=f"item not at a pre-change stage (stage={item.stage.value})",
                 wip=wip,
                 ceiling=self.wip_ceiling,
             )
@@ -128,7 +138,7 @@ class AdmissionController:
             )
 
         # Gate 3: unblocked (§4.3).
-        blocked, evaluations = is_item_blocked(issue, world)
+        blocked, evaluations = is_item_blocked(item, world)
         if blocked:
             blocker = next(
                 (ev for ev in evaluations if not ev.satisfied and not ev.undecidable),

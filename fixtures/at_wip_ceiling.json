@@ -1,34 +1,29 @@
 {
-  "description": "WIP saturated (3 PRs, ceiling=3): a new actionable issue should be BLOCKED by admission, not ACT",
+  "description": "WIP saturated (3 items in flight, ceiling=3): a ready item is BLOCKED by admission, not ACT. Every in-flight condition is charged identically — clean, pending and draft each occupy one slot (§4.2), which is the accounting the pre-0.9.0 model needed an enumeration of exempt PR states to get right.",
   "config": {"wip_ceiling": 3},
   "items": [
     {
       "id": "p1",
-      "kind": "pr",
-      "state": "open_clean_green",
-      "title": "PR 1",
-      "mergeable": true,
-      "ci_green": true
+      "stage": "in_flight",
+      "title": "Change 1 — clean",
+      "change": {"ref": "p1", "condition": "clean", "mergeable": true, "ci_green": true}
     },
     {
       "id": "p2",
-      "kind": "pr",
-      "state": "open_clean_green",
-      "title": "PR 2",
-      "mergeable": true,
-      "ci_green": true
+      "stage": "in_flight",
+      "title": "Change 2 — clean",
+      "change": {"ref": "p2", "condition": "clean", "mergeable": true, "ci_green": true}
     },
     {
       "id": "p3",
-      "kind": "pr",
-      "state": "open_pending_ci",
-      "title": "PR 3"
+      "stage": "in_flight",
+      "title": "Change 3 — CI still running",
+      "change": {"ref": "p3", "condition": "ci_pending"}
     },
     {
       "id": "i1",
-      "kind": "issue",
-      "state": "open_issue_actionable",
-      "title": "New issue at ceiling"
+      "stage": "proposed",
+      "title": "New item at ceiling"
     }
   ],
   "world": {
@@ -38,9 +33,9 @@
     "pipeline_runs": []
   },
   "expected": {
-    "p1": {"kind": "terminal"},
-    "p2": {"kind": "terminal"},
-    "p3": {"kind": "terminal"},
-    "i1": {"kind": "blocked"}
+    "p1": {"kind": "terminal", "stage": "in_flight"},
+    "p2": {"kind": "terminal", "stage": "in_flight"},
+    "p3": {"kind": "terminal", "stage": "in_flight"},
+    "i1": {"kind": "blocked", "stage": "ready"}
   }
 }

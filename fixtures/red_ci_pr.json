@@ -1,16 +1,18 @@
 {
-  "description": "A PR with failing CI → ACT fix_ci",
+  "description": "An item in flight whose change has failing CI. Fixing CI is inside the loop's own write authority, so it is work (ACT), never a dependency (§3.5).",
   "items": [
     {
       "id": "p1",
-      "kind": "pr",
-      "state": "open_red_ci",
+      "stage": "in_flight",
       "title": "Add feature X",
       "labels": [],
-      "is_draft": false,
-      "mergeable": true,
-      "ci_green": false,
-      "security_threads": 0
+      "change": {
+        "ref": "p1",
+        "condition": "ci_red",
+        "mergeable": true,
+        "ci_green": false,
+        "security_threads": 0
+      }
     }
   ],
   "world": {
@@ -20,6 +22,6 @@
     "pipeline_runs": []
   },
   "expected": {
-    "p1": {"kind": "act", "action": "fix_ci"}
+    "p1": {"kind": "act", "action": "fix_ci", "stage": "in_flight"}
   }
 }

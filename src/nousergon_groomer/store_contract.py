@@ -46,8 +46,7 @@ from .models import (
     Disposition,
     DispositionKind,
     Item,
-    ItemKind,
-    ItemState,
+    ItemStage,
     ObservedGeneration,
 )
 from .observed_gen import GenerationStoreProtocol, record_evaluation
@@ -80,14 +79,23 @@ def sample_generation(item_id: str = "repo#1") -> ObservedGeneration:
         disposition_action=None,
         dependency_satisfied_at={"s3_object:s3://bucket/other": "2026-08-04T00:00:00+00:00"},
         satisfied_tokens=["s3_object:s3://bucket/other"],
+        stage="in_flight",
+        # Deliberately several stages, with distinct timestamps: F7 is the
+        # difference between two of these, so a backend that keeps the map but
+        # flattens it to one entry loses the measurement while still round-
+        # tripping something that looks right.
+        stage_entered_at={
+            "proposed": "2026-08-01T00:00:00+00:00",
+            "ready": "2026-08-02T00:00:00+00:00",
+            "in_flight": "2026-08-03T00:00:00+00:00",
+        },
     )
 
 
 def _issue(item_id: str, deps: Optional[list] = None) -> Item:
     return Item(
         id=item_id,
-        kind=ItemKind.ISSUE,
-        state=ItemState.OPEN_ISSUE_ACTIONABLE,
+        stage=ItemStage.PROPOSED,
         declared_dependencies=deps or [],
     )
 

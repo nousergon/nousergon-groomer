@@ -21,17 +21,17 @@ def test_package_imports():
 
 def test_core_types_load():
     from nousergon_groomer.models import (
+        ChangeCondition,
         DependencyKind,
         DispositionKind,
-        ItemKind,
-        ItemState,
+        ItemStage,
     )
 
-    assert ItemKind.ISSUE == "issue"
-    assert ItemKind.PR == "pr"
+    assert ItemStage.PROPOSED == "proposed"
+    assert ItemStage.VERIFIED == "verified"
     assert DispositionKind.ACT == "act"
     assert DependencyKind.S3_OBJECT == "s3_object"
-    assert ItemState.OPEN_CLEAN_GREEN == "open_clean_green"
+    assert ChangeCondition.CONFLICTED == "conflicted"
 
 def test_dependency_rejects_empty_target():
     """§3.1 — an unevaluable dependency is rejected at construction."""

@@ -1,16 +1,21 @@
 """Lane classifier — auto-merge Gate A and Gate B lane assignment.
 
-A PR is eligible for auto-merge only if it passes **Gate A** (five cleanliness
-checks) AND matches **exactly one** auto-merge lane (Gate B). This module is a
-pure function over an :class:`Item`; it makes no network calls and consults
-no model. The lane *labels* are the framework-level convention documented in
-the auto-merge policy; the specific lane membership of a given PR is
-adapter data carried on ``item.labels``.
+An item is eligible for auto-merge only if it carries a change, passes **Gate
+A** (five cleanliness checks) AND matches **exactly one** auto-merge lane (Gate
+B). This module is a pure function over an :class:`Item`; it makes no network
+calls and consults no model. The lane *labels* are the framework-level
+convention documented in the auto-merge policy; the specific lane membership of
+a given item is adapter data carried on ``item.labels``.
+
+The eligibility question is asked of the **item**, scoped to its ``in_flight``
+stage (§3's Forbids: no rule is defined over pull requests alone). The
+cleanliness facts come from the change rendering that stage — an item with no
+change has nothing to merge, which is a different answer from "unclean".
 
 Gate A checks (all must pass; an undecidable observation fails the check —
 we never auto-merge what we cannot confirm clean):
 
-1. ``not_draft``      — the PR is not a draft.
+1. ``not_draft``      — the change is not a draft.
 2. ``no_open_dependency`` — every dependency the PR **declares** is observed
    satisfied, and it carries no ``gate:*`` projection that nothing declares.
 3. ``mergeable_clean`` — GitHub reports ``mergeable == True``.
@@ -42,7 +47,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from .dependency_evaluator import ObservedWorld, evaluate_item_dependencies
-from .models import Item, ItemKind
+from .models import Item
 
 # ---------------------------------------------------------------------------
 # Lane enumeration
@@ -137,17 +142,20 @@ def _evaluate_open_dependencies(
 def _evaluate_gate_a(item: Item, world: Optional[ObservedWorld] = None) -> GateAResult:
     """Run the five Gate A checks against ``item``.
 
+    ``item.change`` is guaranteed non-``None`` here: :func:`classify_lane`
+    rejects an item with no change before reaching this function, because "no
+    change to merge" is a different answer from "the change is not clean".
+
     An undecidable observation (``mergeable is None``, ``ci_green is None``, an
     unevaluable declared dependency) fails the corresponding check — auto-merge
     requires positive confirmation of cleanliness, never absence of evidence.
     """
-    not_draft = (not item.is_draft) and (
-        item.state.value != "draft" if hasattr(item.state, "value") else True
-    )
+    change = item.change
+    not_draft = not change.is_draft
     no_open_dependency, open_dependency_reasons = _evaluate_open_dependencies(item, world)
-    mergeable_clean = item.mergeable is True
-    ci_green = item.ci_green is True
-    no_security_threads = item.security_threads == 0
+    mergeable_clean = change.mergeable is True
+    ci_green = change.ci_green is True
+    no_security_threads = change.security_threads == 0
 
     failed: list[str] = []
     if not not_draft:
@@ -226,11 +234,14 @@ def classify_lane(
     item declaring any dependency then fails check 2, because auto-merge
     requires positive confirmation and no observation was supplied.
 
-    Non-PR items are never eligible; this is reported with a populated (but
-    trivially-failing) Gate A so the caller sees a consistent shape.
+    An item carrying no change is never eligible; this is reported with a
+    populated (but trivially-failing) Gate A so the caller sees a consistent
+    shape.
     """
-    # A non-PR is never an auto-merge candidate.
-    if item.kind is not ItemKind.PR:
+    # An item with no change has nothing to merge. This covers every stage
+    # before `in_flight` and the issue-side twin of a separately-enumerated
+    # change — the record holding the change is the one classified.
+    if item.change is None:
         gate_a = GateAResult(
             not_draft=False,
             no_open_dependency=False,
@@ -238,13 +249,13 @@ def classify_lane(
             ci_green=False,
             no_security_threads=False,
             passed=False,
-            failed_checks=["not_a_pr"],
+            failed_checks=["no_change"],
         )
         return LaneClassification(
             eligible=False,
             gate_a=gate_a,
             lane=None,
-            reason="not a PR",
+            reason=f"item carries no change (stage={item.stage.value})",
         )
 
     # Gate A.

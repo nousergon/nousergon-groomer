@@ -15,12 +15,13 @@ from __future__ import annotations
 
 from nousergon_groomer.dependency_evaluator import ObservedWorld
 from nousergon_groomer.models import (
+    Change,
+    ChangeCondition,
     Dependency,
     DependencyKind,
     DispositionKind,
     Item,
-    ItemKind,
-    ItemState,
+    ItemStage,
 )
 from nousergon_groomer.observed_gen import GenerationStore
 from nousergon_groomer.reconciler import (
@@ -38,14 +39,27 @@ def _world_full() -> ObservedWorld:
     )
 
 
-def _issue(state: ItemState = ItemState.OPEN_ISSUE_ACTIONABLE, **kw) -> Item:
-    defaults = {"id": "i1", "kind": ItemKind.ISSUE, "state": state}
+def _issue(stage: ItemStage = ItemStage.PROPOSED, **kw) -> Item:
+    """An item with no change yet."""
+    defaults = {"id": "i1", "stage": stage}
     defaults.update(kw)
     return Item(**defaults)
 
 
-def _pr(state: ItemState, **kw) -> Item:
-    defaults = {"id": "p1", "kind": ItemKind.PR, "state": state}
+def _pr(condition: ChangeCondition = ChangeCondition.CLEAN, **kw) -> Item:
+    """An item in flight, carrying a change in ``condition``."""
+    item_id = kw.pop("id", "p1")
+    change = Change(
+        ref=item_id,
+        condition=condition,
+        mergeable=kw.pop("mergeable", None),
+        ci_green=kw.pop("ci_green", None),
+    )
+    defaults = {
+        "id": item_id,
+        "stage": kw.pop("stage", ItemStage.IN_FLIGHT),
+        "change": change,
+    }
     defaults.update(kw)
     return Item(**defaults)
 
@@ -66,9 +80,9 @@ def _reconcile(items, world=None, ceiling=5, generation=1, store=None):
 
 def test_every_item_gets_a_disposition():
     items = [
-        _issue(ItemState.OPEN_ISSUE_ACTIONABLE, id="i1"),
-        _pr(ItemState.OPEN_CLEAN_GREEN, id="p1", mergeable=True, ci_green=True),
-        _issue(ItemState.MERGED, id="i2"),
+        _issue(id="i1"),
+        _pr(ChangeCondition.CLEAN, id="p1", mergeable=True, ci_green=True),
+        _issue(ItemStage.DONE, id="i2"),
     ]
     result = _reconcile(items)
     assert result.enumerated == 3
@@ -97,8 +111,8 @@ def test_no_silent_skips_in_result():
 def test_idempotent_same_state_same_output():
     """Re-running over identical state produces identical output."""
     items = [
-        _issue(ItemState.OPEN_ISSUE_ACTIONABLE, id="i1"),
-        _pr(ItemState.OPEN_RED_CI, id="p1", ci_green=False),
+        _issue(id="i1"),
+        _pr(ChangeCondition.CI_RED, id="p1", ci_green=False),
     ]
     r1 = _reconcile(items, generation=1)
     r2 = _reconcile(items, generation=1)
@@ -141,7 +155,7 @@ def test_actionable_issue_at_wip_ceiling_is_blocked():
     """An actionable issue is BLOCKED when the WIP ceiling is saturated."""
     # 3 PRs already in flight, ceiling=3 → a 4th PR cannot be admitted
     prs = [
-        _pr(ItemState.OPEN_CLEAN_GREEN, id=f"p{n}", mergeable=True, ci_green=True)
+        _pr(ChangeCondition.CLEAN, id=f"p{n}", mergeable=True, ci_green=True)
         for n in range(3)
     ]
     issue = _issue(id="i1")
@@ -173,25 +187,25 @@ def test_blocked_issue_is_not_admitted():
 
 def test_aggregate_counts_correct():
     items = [
-        _issue(ItemState.OPEN_ISSUE_ACTIONABLE, id="i1"),  # ACT create_pr
-        _pr(ItemState.OPEN_RED_CI, id="p1", ci_green=False),  # ACT fix_ci
-        _issue(ItemState.OPEN_ISSUE_BLOCKED, id="i2"),  # UNDECIDABLE (no chain)
-        _issue(ItemState.MERGED, id="i3"),  # TERMINAL
-        _pr(ItemState.OPEN_CLEAN_GREEN, id="p2", mergeable=True, ci_green=True),  # TERMINAL (no lane)
+        _issue(id="i1"),  # ACT create_pr
+        _pr(ChangeCondition.CI_RED, id="p1", ci_green=False),  # ACT fix_ci
+        _issue(id="i2", labels=["gate:decision"]),  # UNDECIDABLE (unbacked gate)
+        _issue(ItemStage.DONE, id="i3"),  # TERMINAL
+        _pr(ChangeCondition.CLEAN, id="p2", mergeable=True, ci_green=True),  # TERMINAL (no lane)
     ]
     result = _reconcile(items, ceiling=5)
     assert result.enumerated == 5
     assert result.acted == 2  # create_pr + fix_ci
     assert result.terminal == 2  # merged + green-no-lane
-    assert result.undecidable == 1  # blocked issue with no chain
+    assert result.undecidable == 1  # unbacked gate projection (§3.3)
     assert result.blocked == 0  # none blocked by deps
     assert result.throughput == 2
 
 
 def test_throughput_is_acted_count():
     items = [
-        _issue(ItemState.OPEN_ISSUE_ACTIONABLE, id="i1"),
-        _pr(ItemState.OPEN_DIRTY, id="p1", mergeable=False),
+        _issue(id="i1"),
+        _pr(ChangeCondition.CONFLICTED, id="p1", mergeable=False),
     ]
     result = _reconcile(items, ceiling=5)
     assert result.throughput == result.acted == 2
@@ -203,10 +217,10 @@ def test_throughput_is_acted_count():
 
 def test_ordered_actions_fix_ci_before_automerge_before_create_pr():
     items = [
-        _issue(ItemState.OPEN_ISSUE_ACTIONABLE, id="i1"),  # create_pr (priority 4)
-        _pr(ItemState.OPEN_RED_CI, id="p1", ci_green=False),  # fix_ci (priority 0)
+        _issue(id="i1"),  # create_pr (priority 4)
+        _pr(ChangeCondition.CI_RED, id="p1", ci_green=False),  # fix_ci (priority 0)
         _pr(
-            ItemState.OPEN_CLEAN_GREEN,
+            ChangeCondition.CLEAN,
             id="p2",
             mergeable=True,
             ci_green=True,
@@ -222,8 +236,8 @@ def test_ordered_actions_fix_ci_before_automerge_before_create_pr():
 
 def test_ordered_actions_only_includes_act():
     items = [
-        _issue(ItemState.OPEN_ISSUE_ACTIONABLE, id="i1"),  # ACT
-        _issue(ItemState.MERGED, id="i2"),  # TERMINAL
+        _issue(id="i1"),  # ACT
+        _issue(ItemStage.DONE, id="i2"),  # TERMINAL
     ]
     result = _reconcile(items, ceiling=5)
     ordered = Reconciler.ordered_actions(result)
@@ -240,28 +254,29 @@ def test_mixed_backlog_end_to_end():
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
     items = [
         # Actionable issue, unblocked → ACT create_pr
-        _issue(ItemState.OPEN_ISSUE_ACTIONABLE, id="i1"),
+        _issue(id="i1"),
         # Actionable issue, blocked on s3 → BLOCKED
-        _issue(ItemState.OPEN_ISSUE_ACTIONABLE, id="i2", declared_dependencies=[dep]),
+        _issue(id="i2", declared_dependencies=[dep]),
         # Green PR with lane → ACT automerge
         _pr(
-            ItemState.OPEN_CLEAN_GREEN,
+            ChangeCondition.CLEAN,
             id="p1",
             mergeable=True,
             ci_green=True,
             labels=["groom-reviewed"],
         ),
         # Red PR → ACT fix_ci
-        _pr(ItemState.OPEN_RED_CI, id="p2", ci_green=False),
-        # Merged → TERMINAL
-        _issue(ItemState.MERGED, id="i3"),
-        # Waiting issue → TERMINAL
-        _issue(ItemState.OPEN_ISSUE_WAITING, id="i4"),
+        _pr(ChangeCondition.CI_RED, id="p2", ci_green=False),
+        # Done → TERMINAL
+        _issue(ItemStage.DONE, id="i3"),
+        # The intent record of a unit already in flight → TERMINAL (its change
+        # carries the verdict; one unit, one verdict)
+        Item(id="i4", stage=ItemStage.IN_FLIGHT, change_ref="p9"),
     ]
     result = _reconcile(items, ceiling=5)
     assert result.enumerated == 6
     assert result.acted == 3  # create_pr + automerge + fix_ci
     assert result.blocked == 1  # i2 blocked on s3
-    assert result.terminal == 2  # merged + waiting
+    assert result.terminal == 2  # done + the intent record deferring to its change
     assert result.undecidable == 0
     assert result.throughput == 3
