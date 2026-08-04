@@ -42,8 +42,7 @@
     "s3_objects": ["s3://ne-artifacts/weekly/2026-08-03/report.json"],
     "s3_prefixes": [],
     "terminal_items": [],
-    "pipeline_runs": ["ne-weekly-freshness-pipeline"],
-    "absent_labels": []
+    "pipeline_runs": ["ne-weekly-freshness-pipeline"]
   },
   "expected": {
     "p1": {"kind": "act", "action": "automerge"},

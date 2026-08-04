@@ -250,7 +250,7 @@ def test_open_draft_with_a_satisfied_gate_dependency_is_act():
                declared_dependencies=[dep])
     world = ObservedWorld(
         s3_objects=set(), s3_prefixes=set(), terminal_items=set(),
-        pipeline_runs={"ne-weekly-freshness-pipeline"}, absent_labels=set(),
+        pipeline_runs={"ne-weekly-freshness-pipeline"},
     )
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)
@@ -374,7 +374,7 @@ def test_green_lane_pr_with_satisfied_gate_dependency_automerges():
                mergeable=True, ci_green=True, declared_dependencies=deps)
     world = ObservedWorld(
         s3_objects={"s3://b/weekly.json"}, s3_prefixes=set(), terminal_items=set(),
-        pipeline_runs={"ne-weekly-freshness-pipeline"}, absent_labels=set(),
+        pipeline_runs={"ne-weekly-freshness-pipeline"},
     )
     graph = _graph([item], world)
     d = compute_disposition(item, graph, world)

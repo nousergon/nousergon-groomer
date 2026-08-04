@@ -10,7 +10,7 @@ def _world(**kw) -> ObservedWorld:
     """A fully-reported world, overridable per surface."""
     defaults = {
         "s3_objects": set(), "s3_prefixes": set(), "terminal_items": set(),
-        "pipeline_runs": set(), "absent_labels": set(),
+        "pipeline_runs": set(),
     }
     defaults.update(kw)
     return ObservedWorld(**defaults)
