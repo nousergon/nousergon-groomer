@@ -182,13 +182,74 @@ def test_item_deps_hash_is_order_independent():
     assert item1.deps_hash == item2.deps_hash
 
 
-def test_item_has_gate_label_detects_gate_prefix():
+# ---------------------------------------------------------------------------
+# Gate representation (alpha-engine-config#6137) — declarations, not labels
+# ---------------------------------------------------------------------------
+
+def _gate_dep(target="s3://b/gate-artifact.json"):
+    return Dependency(kind=DependencyKind.S3_OBJECT, target=target)
+
+
+def test_has_declared_dependency_is_true_when_a_dependency_is_declared():
+    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+                labels=["gate:weekly-sf"], declared_dependencies=[_gate_dep()])
+    assert item.has_declared_dependency is True
+
+
+def test_has_declared_dependency_is_false_for_a_bare_gate_label():
+    """A gate:* label declares nothing — label presence is not a declaration."""
     item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
                 labels=["gate:weekly-sf"])
-    assert item.has_gate_label is True
+    assert item.has_declared_dependency is False
 
 
-def test_item_has_gate_label_false_for_no_gate():
+def test_unrepresented_gate_labels_names_a_projection_with_no_declaration():
+    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+                labels=["gate:weekly-sf", "gate:operator", "groom-reviewed"])
+    assert item.unrepresented_gate_labels == ["gate:weekly-sf", "gate:operator"]
+
+
+def test_unrepresented_gate_labels_empty_once_the_item_declares_its_condition():
+    """The label survives as a projection; it is no longer unbacked."""
+    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+                labels=["gate:weekly-sf"], declared_dependencies=[_gate_dep()])
+    assert item.unrepresented_gate_labels == []
+
+
+def test_unrepresented_gate_labels_empty_for_a_non_gated_item():
     item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
                 labels=["groom-reviewed"])
-    assert item.has_gate_label is False
+    assert item.unrepresented_gate_labels == []
+
+
+def test_has_gate_label_is_deprecated_and_reads_declared_dependencies():
+    """The retired property no longer tests the label prefix.
+
+    An item declaring a dependency and carrying NO gate label is now True —
+    the answer comes from the declaration. The old implementation returned
+    False here, because it only ever looked at ``labels``.
+    """
+    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+                labels=["groom-reviewed"], declared_dependencies=[_gate_dep()])
+    with pytest.deprecated_call():
+        assert item.has_gate_label is True
+
+
+def test_has_gate_label_still_true_for_an_unenriched_gate_labelled_item():
+    """Compatibility for the harness's enrichment SELECTION use.
+
+    Choosing which items to fetch declarations for is an observation use, not
+    a state use; a snapshot item has no declarations yet, so the shim must
+    still select it.
+    """
+    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+                labels=["gate:weekly-sf"])
+    with pytest.deprecated_call():
+        assert item.has_gate_label is True
+
+
+def test_has_gate_label_false_for_an_item_with_neither():
+    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+                labels=["groom-reviewed"])
+    with pytest.deprecated_call():
+        assert item.has_gate_label is False

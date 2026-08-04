@@ -12,9 +12,21 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import warnings
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+#: The framework-level taxonomy prefix a GitHub label uses to *project* a
+#: gated status for human readability (``policy-gate-taxonomy``).
+#:
+#: **The prefix is never read as state** (groom-sweep-policy §3.3: a label may
+#: project status but is never a source of truth; consumers re-derive). The one
+#: place the core still looks at it is
+#: :attr:`Item.unrepresented_gate_labels`, which detects a projection that
+#: *nothing declares* — a representation defect the disposition function
+#: surfaces as UNDECIDABLE rather than resolving in either direction.
+GATE_LABEL_PREFIX = "gate:"
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -304,14 +316,77 @@ class Item(BaseModel):
         return self.state in (ItemState.CLOSED, ItemState.MERGED, ItemState.DO_NOT_GROOM)
 
     @property
-    def has_gate_label(self) -> bool:
-        """True if any label is in the ``gate:`` taxonomy namespace.
+    def has_declared_dependency(self) -> bool:
+        """True if the item declares at least one dependency (§3).
 
-        The ``gate:`` *prefix* is the framework-level taxonomy grammar (see
-        ``policy-gate-taxonomy``); the specific gate family after the colon is
-        adapter data. This property only tests the prefix.
+        This is the only "is this item under an external condition" question
+        the core asks of an item's own fields. *Whether* the condition holds is
+        never answered here — that needs an :class:`ObservedWorld` and is
+        answered by :mod:`dependency_evaluator` / :mod:`dependency_graph`.
         """
-        return any(label.startswith("gate:") for label in self.labels)
+        return bool(self.declared_dependencies)
+
+    @property
+    def unrepresented_gate_labels(self) -> list[str]:
+        """``gate:*`` labels on an item that declares **no** dependency (§3.3).
+
+        A ``gate:*`` label is a *status projection*. Once blocked-ness is
+        derived (§3), a projection with no declaration behind it is a
+        representation defect: the label asserts a condition the reconciler
+        cannot evaluate, in either direction. Reading it as "blocked" is
+        asserting blocked-ness (the thing §3 abolishes); reading its clearance
+        as "unblocked" is the 2026-07-22 incident, in which six gated, CI-red
+        PRs auto-merged because one upstream check owned the exclusion.
+
+        So the core reports it and refuses to decide:
+        :func:`disposition.compute_disposition` maps a non-empty list to
+        UNDECIDABLE. This is not the label used as state — it is the absence
+        of a declaration used as a reason to decline.
+
+        The test is deliberately coarse: *any* declared dependency means the
+        harness translated this item's gates into declarations (that is what
+        ``gate_dependency_adapter.build_declared_dependencies`` does), so the
+        label is a projection of a condition the evaluator now owns. An item
+        with no declarations at all has nothing to derive from, whatever its
+        labels say — which is exactly the state the harness's own enrichment
+        failure path leaves an item in, and it already documents that the
+        reconciler will "surface [it] as undecidable, not silently unblocked."
+        """
+        if self.declared_dependencies:
+            return []
+        return [label for label in self.labels if label.startswith(GATE_LABEL_PREFIX)]
+
+    @property
+    def has_gate_label(self) -> bool:
+        """DEPRECATED — reads declared dependencies, not labels.
+
+        Retired as a state input by ``alpha-engine-config#6137`` (parent
+        ``nous-ergon-ops#356``: Brian ruled the ``gate:*`` taxonomy retired as
+        a state representation on 2026-07-31). **Nothing in this package calls
+        it**; the disposition function and the lane classifier derive from
+        declared dependencies evaluated against an :class:`ObservedWorld`.
+
+        It survives one release as a shim for out-of-tree harnesses that used
+        it to select which items to enrich with declarations — a legitimate
+        *observation* use, unlike the state use it is retired from. Its value
+        is now ``has_declared_dependency or unrepresented_gate_labels``, which
+        is identical to the old label test on a freshly snapshotted item (no
+        declarations yet) and remains true once that item is enriched.
+
+        Use :attr:`has_declared_dependency` (is this item under a declared
+        condition?), :attr:`unrepresented_gate_labels` (is a projection
+        unbacked?), or :func:`dependency_evaluator.is_item_blocked` (is the
+        condition actually unsatisfied?) instead.
+        """
+        warnings.warn(
+            "Item.has_gate_label is deprecated (alpha-engine-config#6137): "
+            "gate:* labels are status projections, never state. Use "
+            "Item.has_declared_dependency, Item.unrepresented_gate_labels, or "
+            "dependency_evaluator.is_item_blocked.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.has_declared_dependency or bool(self.unrepresented_gate_labels)
 
     @property
     def is_human_owned(self) -> bool:

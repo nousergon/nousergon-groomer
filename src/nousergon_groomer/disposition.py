@@ -23,7 +23,19 @@ Precedence (evaluated top-down, first match wins):
    the undecidable dependency. This is checked before state-specific logic
    so a missing world observation is never silently coerced into an ACT or
    BLOCKED.
-4. **State-specific** disposition (see ``_STATE_DISPATCH``).
+4. **Unrepresented gate projection** (§3.3) → UNDECIDABLE, naming the labels.
+   An item carrying a ``gate:*`` label while declaring nothing has a status
+   projection with no spec behind it; see
+   :attr:`models.Item.unrepresented_gate_labels`.
+5. **State-specific** disposition (see ``_STATE_DISPATCH``).
+
+**No branch in this module reads a label as state** (``alpha-engine-config#6137``,
+parent ``nous-ergon-ops#356``). Gate-ness reaches the disposition exactly one
+way: the harness translates a gate into declared dependencies, the observer
+reports the surfaces those dependencies name, and the evaluator decides. A
+gate that has cleared therefore unblocks its item with no actor and no label
+edit; a gate that has not names its real condition — an S3 key, a pipeline
+run, a blocking item — rather than the label that hid it.
 """
 from __future__ import annotations
 
@@ -126,7 +138,11 @@ def _disposition_open_clean_green(
         # F5: a green PR can still be blocked on a declared dependency. The
         # reconciler must not merge a PR whose declared deps are unsatisfied.
         return _blocked(chain)
-    lane = classify_lane(item)
+    # The world is passed so Gate A can re-derive the item's declared
+    # conditions rather than trust the chain check above. §3.3's forbidden
+    # shape is a single upstream check owning the exclusion — that is the
+    # 2026-07-22 incident verbatim — so both surfaces derive independently.
+    lane = classify_lane(item, world)
     if lane.eligible:
         return _act(
             "automerge",
@@ -163,22 +179,23 @@ def _disposition_open_dirty(
 def _disposition_open_draft(
     item: Item, graph: DependencyGraph, world: ObservedWorld
 ) -> Disposition:
-    """A draft PR: ACT to author it forward or block on a named gate.
+    """A draft PR: ACT to author it forward, or BLOCKED on a declared condition.
 
-    Per pull-request-policy §4.1, a draft must be actively authored or
-    blocked by a named gate; a draft that is neither is a defect.
+    Per pull-request-policy §4.1, a draft must be actively authored or blocked
+    by a named gate; a draft that is neither is a defect. "Blocked by a named
+    gate" is now the ``chain`` branch above — the gate is named by the
+    *condition* it rests on, derived from the item's declarations against the
+    observed world.
+
+    A draft whose declared conditions are all satisfied is ACT, even when it
+    still carries the ``gate:*`` label its gate was projected with: the label
+    is a stale projection and the loop's job is to advance the draft. Reading
+    the label here is what made a cleared gate need an actor to clear it —
+    the property §3 exists to remove (a draft is never a resting state).
     """
     chain = graph.get_blocked_chain(item.id)
     if chain:
         return _blocked(chain)
-    if item.has_gate_label:
-        # A draft carrying a gate:* label is at rest on that gate — the
-        # reconciler cannot advance it until the gate clears.
-        gate_labels = [lb for lb in item.labels if lb.startswith("gate:")]
-        return _terminal(
-            item,
-            f"draft PR at rest on gate label(s): {', '.join(gate_labels)}",
-        )
     return _act("advance_draft", reason="draft PR must be authored forward")
 
 
@@ -249,7 +266,22 @@ def compute_disposition(
             f"undecidable dependency (world did not report the surface): {names}"
         )
 
-    # 4. State-specific dispatch. A missing handler is a totality defect.
+    # 4. Unrepresented gate projection (§3.3) — a gate:* label with no
+    #    declaration behind it. Neither branch is derivable: treating the
+    #    label as blocked asserts blocked-ness (what §3 abolishes), and
+    #    treating it as unblocked is the 2026-07-22 auto-merge incident. The
+    #    honest disposition is UNDECIDABLE, which also keeps the item out of
+    #    every ACT path below — including auto-merge — by construction.
+    unrepresented = item.unrepresented_gate_labels
+    if unrepresented:
+        return _undecidable(
+            "gate label(s) project a blocked status with no declared "
+            f"dependency behind them: {', '.join(unrepresented)} "
+            "(groom-sweep-policy §3.3: a label is a status projection, never a "
+            "source of truth — declare the condition the gate names)"
+        )
+
+    # 5. State-specific dispatch. A missing handler is a totality defect.
     handler = _STATE_DISPATCH.get(item.state)
     if handler is None:
         # Loud failure: a new ItemState was added without a handler.

@@ -26,8 +26,14 @@ harness (dispatch, merge execution, PAT) lives in the private layer.
   is at the leaf, invoked by the private harness, not here.
 - **No dispatch / scheduler.** When to run, which credentials to use, and
   how to perform a merge are the private harness's concern.
-- **No fleet-specific configuration.** Gate labels, lane definitions, and
+- **No fleet-specific configuration.** Gate families, lane definitions, and
   issue-body formats are adapter data passed in, not hardcoded.
+- **No label read as state.** A `gate:*` label is a status projection, never
+  a source of truth: blocked-ness is derived from declared dependencies
+  evaluated against the observed world, so a gate that has cleared unblocks
+  its item with no actor and no label edit. A projection with no declaration
+  behind it is a representation defect, and the disposition is UNDECIDABLE —
+  never resolved in either direction.
 
 ## Architecture
 
@@ -152,7 +158,8 @@ that scenario:
 | `blocked_issue` | issue blocked on an S3 object | BLOCKED |
 | `transitive_blocked` | A blocked on B blocked on C | BLOCKED (chain) |
 | `at_wip_ceiling` | WIP saturated, new issue | BLOCKED (admission) |
-| `gate_labeled_pr` | green PR with a `gate:*` label | TERMINAL |
+| `gate_labeled_pr` | green PR with a `gate:*` label and no declaration | UNDECIDABLE |
+| `gate_derived_dependency` | gated PRs whose gates are declared dependencies | ACT / BLOCKED / ACT |
 | `do_not_groom` | item marked do-not-groom | TERMINAL |
 | `undecidable` | unobservable dependency | UNDECIDABLE |
 
