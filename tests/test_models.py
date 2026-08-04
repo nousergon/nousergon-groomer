@@ -17,6 +17,8 @@ from nousergon_groomer.models import (
     ObservedGeneration,
     VerificationObligation,
     can_transition,
+    parse_dependency_declaration,
+    passes_agency_test,
 )
 
 # ---------------------------------------------------------------------------
@@ -43,6 +45,93 @@ def test_dependency_rejects_none_target():
 def test_dependency_accepts_valid_target():
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
     assert dep.target == "s3://b/k"
+
+
+# ---------------------------------------------------------------------------
+# §3.1 + §3.5 — the raw-declaration chokepoint (alpha-engine-config#6309)
+#
+# ``Dependency.model_validate(raw)`` / ``parse_dependency_declaration(raw)``
+# is the write boundary a harness calls when translating a `Verified-when:`
+# body line or an issue custom field into a declared dependency. Typed
+# construction (``Dependency(kind=..., target=...)``, exercised above) is a
+# separate, unaffected path.
+# ---------------------------------------------------------------------------
+
+def test_declaration_rejects_unparseable_prose():
+    """The measured defect: alpha-engine-research-PR549 carried prose in a
+    Verified-when field with nothing rejecting it at authorship. A closed
+    allowlist of permitted subjects (§3.5's gotcha) has no pattern for
+    branch state, so this is rejected here rather than discovered unevaluable
+    by a later sweep.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="does not name a permitted subject"):
+        parse_dependency_declaration("branch is not behind main")
+
+
+def test_declaration_rejects_empty_string():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="empty dependency declaration"):
+        parse_dependency_declaration("   ")
+
+
+def test_declaration_rejects_unqualified_issue_reference():
+    """A bare ``owner/repo#N`` is ambiguous between issue and PR — not
+    machine-evaluable as written, so it is not in the allowlist either.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        parse_dependency_declaration("nousergon/alpha-engine-config#6309")
+
+
+@pytest.mark.parametrize(
+    ("raw", "kind", "target"),
+    [
+        ("s3://bucket/key.json", DependencyKind.S3_OBJECT, "s3://bucket/key.json"),
+        ("s3://bucket/prefix/", DependencyKind.S3_PREFIX, "s3://bucket/prefix/"),
+        (
+            "issue:nousergon/alpha-engine-config#6309",
+            DependencyKind.ISSUE_TERMINAL,
+            "nousergon/alpha-engine-config#6309",
+        ),
+        (
+            "pr:nousergon/nousergon-groomer#39",
+            DependencyKind.PR_TERMINAL,
+            "nousergon/nousergon-groomer#39",
+        ),
+        ("pipeline_run:weekly-sf-20260804", DependencyKind.PIPELINE_RUN, "weekly-sf-20260804"),
+        ("2026-08-10", DependencyKind.DATE, "2026-08-10"),
+        ("milestone:m1", DependencyKind.MILESTONE_REACHED, "m1"),
+    ],
+)
+def test_declaration_parses_every_permitted_subject(raw, kind, target):
+    dep = parse_dependency_declaration(raw)
+    assert dep.kind is kind
+    assert dep.target == target
+
+
+# ---------------------------------------------------------------------------
+# §3.5 — the agency test
+# ---------------------------------------------------------------------------
+
+def test_agency_test_passes_every_permitted_kind():
+    for kind in DependencyKind:
+        dep = Dependency(kind=kind, target="x")
+        assert passes_agency_test(dep) is True
+
+
+def test_agency_allowlist_covers_every_dependency_kind():
+    """Pins today's equality so a future ``DependencyKind`` added without a
+    matching addition to the agency allowlist goes red here rather than
+    silently passing as external (alpha-engine-config#6309's gotcha: fail
+    closed on a new forbidden subject).
+    """
+    from nousergon_groomer.models import _AGENCY_EXTERNAL_KINDS
+
+    assert _AGENCY_EXTERNAL_KINDS == set(DependencyKind)
 
 
 # ---------------------------------------------------------------------------

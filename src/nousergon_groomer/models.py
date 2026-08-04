@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as _dt
 import enum
 import hashlib
+import re
 import warnings
 from typing import Any, Optional
 
@@ -171,6 +172,85 @@ class DispositionKind(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
+# Declaration chokepoint (§3.1 + §3.5) — parsing a raw predicate string
+# ---------------------------------------------------------------------------
+#
+# A harness (the GitHub snapshot adapter, a `Verified-when:` body line, an
+# issue custom field) hands the loop a raw string, not a typed {kind, target}
+# pair. Nothing upstream of this module parsed that string before
+# alpha-engine-config#6309 — it passed through as prose, which is exactly how
+# `alpha-engine-research-PR549` carried an unparseable predicate in a
+# `Verified-when` field with nothing rejecting it at authorship.
+#
+# The patterns below are a **closed allowlist of permitted subjects**
+# (groom-sweep-policy §3.5's gotcha), not a denylist of forbidden ones: a
+# raw string that names branch state, CI state, review state, label state or
+# draft state has no pattern here to match, so it is rejected by omission
+# rather than by a rule that has to name every forbidden shape and can be
+# outrun by a new one. Every pattern maps onto a `DependencyKind` that
+# already names a condition outside the loop's own write authority — see
+# `passes_agency_test` below, which asserts that invariant explicitly rather
+# than leaving it implicit in "the patterns happened to be written this way."
+_S3_PREFIX_RE = re.compile(r"^s3://[^/\s]+/\S*/$")
+_S3_OBJECT_RE = re.compile(r"^s3://[^/\s]+/\S*[^/\s]$")
+_ISSUE_TERMINAL_RE = re.compile(r"^issue:(\S+/\S+#\d+)$")
+_PR_TERMINAL_RE = re.compile(r"^pr:(\S+/\S+#\d+)$")
+_PIPELINE_RUN_RE = re.compile(r"^pipeline_run:(\S+)$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MILESTONE_RE = re.compile(r"^milestone:(\S+)$")
+
+
+def _parse_declaration_text(raw: str) -> dict[str, Any]:
+    """Parse a raw predicate string into a ``{kind, target}`` mapping (§3.1).
+
+    Tried in order against the closed allowlist above; the first match wins.
+    Raises ``ValueError`` — which pydantic wraps into ``ValidationError`` when
+    this runs inside :meth:`Dependency.model_validate` — for anything that
+    does not name one of the permitted subjects, including empty/whitespace
+    input, a bare label name, an unqualified ``owner/repo#N`` (ambiguous
+    between an issue and a PR, so not machine-evaluable as written), and
+    prose such as ``"branch is not behind main"``: both that string and
+    ``"s3://…/weekly-sf/"`` are machine-evaluable in the sense that a
+    computer could check them, but only the second names a condition outside
+    the loop's own write authority (§3.5's gotcha — the distinction the
+    allowlist exists to enforce rather than a string-shape check).
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError(
+            "empty dependency declaration (§3.1: a dependency must name a "
+            "condition; nothing was declared)"
+        )
+    if _S3_PREFIX_RE.match(text):
+        return {"kind": DependencyKind.S3_PREFIX, "target": text}
+    if _S3_OBJECT_RE.match(text):
+        return {"kind": DependencyKind.S3_OBJECT, "target": text}
+    m = _ISSUE_TERMINAL_RE.match(text)
+    if m:
+        return {"kind": DependencyKind.ISSUE_TERMINAL, "target": m.group(1)}
+    m = _PR_TERMINAL_RE.match(text)
+    if m:
+        return {"kind": DependencyKind.PR_TERMINAL, "target": m.group(1)}
+    m = _PIPELINE_RUN_RE.match(text)
+    if m:
+        return {"kind": DependencyKind.PIPELINE_RUN, "target": m.group(1)}
+    if _DATE_RE.match(text):
+        return {"kind": DependencyKind.DATE, "target": text}
+    m = _MILESTONE_RE.match(text)
+    if m:
+        return {"kind": DependencyKind.MILESTONE_REACHED, "target": m.group(1)}
+    raise ValueError(
+        f"dependency declaration {text!r} does not name a permitted subject "
+        "(§3.1 + §3.5: only s3://bucket/key, s3://bucket/prefix/, "
+        "issue:owner/repo#N, pr:owner/repo#N, pipeline_run:<id>, an "
+        "ISO-8601 date, or milestone:<id> parse into an evaluable, "
+        "externally-owned DependencyKind — branch, CI, review, label and "
+        "draft state are inside the loop's own write authority and are "
+        "never a dependency, so no pattern exists for them here)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Spec layer (§3.3) — what an author declared
 # ---------------------------------------------------------------------------
 
@@ -183,10 +263,28 @@ class Dependency(BaseModel):
     carries no ``satisfied`` flag. Validation at the write boundary (§3.1)
     rejects empty/whitespace targets here, at construction, so a recorded
     dependency can never be silently unevaluable due to a missing target.
+
+    **The write boundary also accepts a raw predicate string** (§3.1
+    deliverable, alpha-engine-config#6309): ``Dependency.model_validate(raw)``
+    where ``raw`` is a bare ``str`` — as it arrives from a ``Verified-when:``
+    body line or an issue custom field — parses it via
+    :func:`_parse_declaration_text` before the field validators below run,
+    and rejects it here, at declaration, if it does not parse into one of
+    the closed allowlist's permitted subjects. Typed construction
+    (``Dependency(kind=..., target=...)``) is unaffected — the raw-string
+    path only fires when the *whole model* is handed a bare string rather
+    than a mapping.
     """
 
     kind: DependencyKind
     target: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_raw_declaration(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            return _parse_declaration_text(data)
+        return data
 
     @field_validator("target")
     @classmethod
@@ -197,6 +295,99 @@ class Dependency(BaseModel):
                 "dependencies are validated at the write boundary)"
             )
         return v
+
+    @model_validator(mode="after")
+    def _check_agency(self) -> Dependency:
+        # Defence in depth (§3.5: "both [evaluability and agency] are checked
+        # at declaration"): every kind reachable from the raw-string parser
+        # above is already agency-safe by construction, so this can never
+        # fire via that path. It fires for a *typed* construction
+        # (``Dependency(kind=..., target=...)``) carrying a kind a future
+        # change added to `DependencyKind` without extending
+        # `_AGENCY_EXTERNAL_KINDS` to match — failing closed rather than
+        # silently trusting a new kind as external.
+        if not passes_agency_test(self):
+            raise ValueError(
+                f"DependencyKind {self.kind.value!r} is not in the agency-safe "
+                "allowlist (§3.5: a dependency must name a condition outside "
+                "the loop's own write authority) — extend "
+                "_AGENCY_EXTERNAL_KINDS if this kind is genuinely external, "
+                "or this construction is a §3.5 violation"
+            )
+        return self
+
+
+def parse_dependency_declaration(raw: str) -> Dependency:
+    """Parse a raw predicate string into a validated :class:`Dependency`.
+
+    The named entry point for the §3.1 write-boundary chokepoint
+    (alpha-engine-config#6309): a harness translating a ``Verified-when:``
+    body line or an issue custom field into a declared dependency calls this
+    rather than constructing ``Dependency`` from an already-split
+    ``{kind, target}`` pair. Thin wrapper over
+    ``Dependency.model_validate(raw)`` — kept as a function so the chokepoint
+    has one discoverable name rather than requiring every caller to know the
+    raw-string construction path is even supported.
+
+    Raises ``pydantic.ValidationError`` (via :func:`_parse_declaration_text`)
+    if ``raw`` does not parse into one of the closed allowlist's permitted
+    subjects.
+    """
+    return Dependency.model_validate(raw)
+
+
+#: Declared-dependency kinds naming a condition genuinely outside the loop's
+#: own write authority (§3.5's agency test) — a closed **allowlist**, not a
+#: denylist of forbidden subjects, per the gotcha in alpha-engine-config#6309:
+#: a new `DependencyKind` added without also being added here fails closed
+#: (`passes_agency_test` returns ``False`` for it) rather than being silently
+#: trusted as external.
+#:
+#: Deliberately an **explicit literal set**, not ``frozenset(DependencyKind)``
+#: — the whole point is that this list does *not* grow automatically when a
+#: new member is added to the enum. Every kind `DependencyKind` currently
+#: defines is external by construction (there is deliberately no kind for
+#: branch, CI, review, label or draft state: those are `ChangeCondition`
+#: values, reconciled by `disposition.py` as `act`, never rested on), so this
+#: set equals `set(DependencyKind)` today, but a future kind added to the
+#: enum without a matching addition *here* is agency-unsafe by default.
+#: `test_models.py::test_agency_allowlist_covers_every_dependency_kind` pins
+#: today's equality so it goes red — not silently passes — the moment
+#: `DependencyKind` gains a member this set does not also gain.
+_AGENCY_EXTERNAL_KINDS: frozenset[DependencyKind] = frozenset({
+    DependencyKind.S3_OBJECT,
+    DependencyKind.S3_PREFIX,
+    DependencyKind.ISSUE_TERMINAL,
+    DependencyKind.PR_TERMINAL,
+    DependencyKind.PIPELINE_RUN,
+    DependencyKind.DATE,
+    DependencyKind.MILESTONE_REACHED,
+})
+
+
+def passes_agency_test(dep: Dependency) -> bool:
+    """§3.5's agency test: does ``dep`` name a condition outside the loop's
+    own write authority?
+
+    Returns ``True`` iff the action that would satisfy ``dep`` is not one
+    the reconciler could take itself — i.e. ``dep.kind`` is in the closed
+    allowlist :data:`_AGENCY_EXTERNAL_KINDS`. A merge conflict, a stale
+    branch, a red re-runnable check and an absent review are each already
+    unrepresentable as a ``Dependency`` (there is no kind for them — see
+    :class:`DependencyKind`'s docstring); when one of those is declared as
+    prose it is rejected by :func:`_parse_declaration_text` before it ever
+    reaches this function. This function is the second, independent half of
+    the same test (§3.5: "both are checked at declaration"), guarding the
+    *typed* construction path a caller may use to bypass the string parser.
+
+    Callers computing a disposition should treat a dependency failing this
+    test as ``act``, never ``blocked`` — in practice that disposition is
+    already reached by :mod:`disposition`'s ``ChangeCondition`` handlers
+    (``_condition_conflicted``, ``_condition_ci_red``) once the bogus
+    declaration has been rejected at the door and never reaches
+    ``declared_dependencies``.
+    """
+    return dep.kind in _AGENCY_EXTERNAL_KINDS
 
 
 class Change(BaseModel):

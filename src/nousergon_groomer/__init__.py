@@ -53,6 +53,8 @@ from .models import (
     ObservedGeneration,
     VerificationObligation,
     can_transition,
+    parse_dependency_declaration,
+    passes_agency_test,
 )
 from .observed_gen import (
     GenerationStore,
@@ -79,6 +81,8 @@ __all__ = [
     "DispositionKind",
     "VerificationObligation",
     "can_transition",
+    "parse_dependency_declaration",
+    "passes_agency_test",
     "effective_stage",
     "GenerationStore",
     "GenerationStoreProtocol",
@@ -102,4 +106,4 @@ __all__ = [
     "ReconcilerResult",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
