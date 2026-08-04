@@ -78,7 +78,15 @@ def _terminal(item: Item, reason: str) -> Disposition:
 
 
 def _blocked(chain: list[DependencyEvaluation]) -> Disposition:
-    """Build a BLOCKED disposition naming the root-cause chain."""
+    """Build a BLOCKED disposition naming the root-cause chain (§3.4).
+
+    ``chain`` is the full transitive path :class:`DependencyGraph` walked to
+    reach the root external condition — not just this item's own direct
+    dependency. Both a human-readable ``reason`` (the ``" -> "``-joined
+    prose a comment or CLI table already renders) and the same sequence as
+    structured ``blocking_chain`` tokens are set from the identical list, so
+    the two surfaces can never drift apart (alpha-engine-config#6500).
+    """
     if not chain:
         # Defensive: callers should only pass a non-empty chain. An empty
         # chain with a BLOCKED request is a logic error — fail loud.
@@ -86,12 +94,12 @@ def _blocked(chain: list[DependencyEvaluation]) -> Disposition:
             "compute_disposition: _blocked called with empty chain "
             "(§5.1: a BLOCKED disposition must name its blocking chain)"
         )
-    names = " -> ".join(
-        f"{ev.dependency.kind.value}:{ev.dependency.target}" for ev in chain
-    )
+    tokens = [f"{ev.dependency.kind.value}:{ev.dependency.target}" for ev in chain]
+    names = " -> ".join(tokens)
     return Disposition(
         kind=DispositionKind.BLOCKED,
         reason=f"blocked on: {names}",
+        blocking_chain=tokens,
     )
 
 
@@ -323,6 +331,12 @@ def _disposition_merged(
             f"merged; awaiting post-merge verification of {token} "
             f"(deadline {obligation.deadline})"
         ),
+        # A single-token chain: the obligation's own predicate is the (only)
+        # unsatisfied condition — there is nothing upstream of it to walk,
+        # unlike a §3.4 DependencyGraph chain, but the same structured field
+        # carries it so a consumer never special-cases which BLOCKED reason
+        # it is looking at (alpha-engine-config#6500).
+        blocking_chain=[token],
     )
 
 

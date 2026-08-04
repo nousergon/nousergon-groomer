@@ -639,6 +639,17 @@ class ObservedGeneration(BaseModel):
     disposition_reason: Optional[str] = None
     disposition_action: Optional[str] = None
 
+    #: :attr:`Disposition.blocking_chain`, carried forward for the same
+    #: reason the three fields above are (alpha-engine-config#6500): a
+    #: skipped item's rebuilt disposition (:func:`reconciler._recorded_disposition`)
+    #: reconstructs from exactly what is stored here, never by recomputing —
+    #: a record missing the chain would silently degrade a skipped BLOCKED
+    #: item's rendered comment from the full §3.4 chain back to prose-only on
+    #: every cycle it skips. Empty on records written before this field
+    #: existed or for a BLOCKED verdict that carries no chain (e.g. admission
+    #: denial).
+    disposition_blocking_chain: list[str] = Field(default_factory=list)
+
     #: ``"<kind>:<target>"`` → ISO-8601 timestamp at which that dependency was
     #: **first observed satisfied** (§3.6).
     #:
@@ -711,11 +722,24 @@ class Disposition(BaseModel):
       undecidable item to ACT or BLOCKED).
     - ``ACT`` requires a concrete ``action`` (an ACT with no action is a
       no-op disguised as work — fail loud).
+
+    ``blocking_chain`` (§3.4, alpha-engine-config#6500) is the **structured**
+    form of a BLOCKED verdict's root-cause chain: ``"<kind>:<target>"`` tokens
+    in traversal order, starting at the item's own declared dependency and
+    ending at the root external condition — the same sequence
+    :func:`dependency_graph.DependencyGraph.get_blocked_chain` returns, kept
+    as data rather than requiring a consumer to parse it back out of
+    ``reason``'s ``" -> "``-joined prose. Empty for a BLOCKED verdict that
+    names no dependency chain at all — an admission-denied (WIP ceiling)
+    BLOCKED is a queue constraint, not a §3.4 chain, and a post-merge
+    verification BLOCKED carries a single-token chain (its own predicate).
+    Never populated for any non-BLOCKED kind.
     """
 
     kind: DispositionKind
     reason: Optional[str] = None
     action: Optional[str] = None
+    blocking_chain: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_invariants(self) -> Disposition:
@@ -731,6 +755,12 @@ class Disposition(BaseModel):
                     "Disposition(ACT) requires a non-empty action "
                     "(§5.1: an ACT disposition must name the concrete action)"
                 )
+        if self.kind is not DispositionKind.BLOCKED and self.blocking_chain:
+            raise ValueError(
+                f"Disposition({self.kind.value}) carries a non-empty "
+                "blocking_chain — a root-cause chain is only meaningful on a "
+                "BLOCKED verdict (§3.4)"
+            )
         return self
 
 

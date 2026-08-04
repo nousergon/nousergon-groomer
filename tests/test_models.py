@@ -224,6 +224,35 @@ def test_disposition_terminal_ok():
 
 
 # ---------------------------------------------------------------------------
+# blocking_chain (§3.4, alpha-engine-config#6500) — structured root-cause chain
+# ---------------------------------------------------------------------------
+
+
+def test_disposition_blocking_chain_defaults_empty():
+    d = Disposition(kind=DispositionKind.BLOCKED, reason="blocked on x")
+    assert d.blocking_chain == []
+
+
+def test_disposition_blocked_carries_structured_chain():
+    d = Disposition(
+        kind=DispositionKind.BLOCKED,
+        reason="blocked on: issue_terminal:i2 -> s3_object:s3://b/k",
+        blocking_chain=["issue_terminal:i2", "s3_object:s3://b/k"],
+    )
+    assert d.blocking_chain == ["issue_terminal:i2", "s3_object:s3://b/k"]
+
+
+def test_disposition_non_blocked_rejects_a_blocking_chain():
+    """A blocking_chain is only meaningful on a BLOCKED verdict — fail closed."""
+    with pytest.raises(ValueError, match="blocking_chain"):
+        Disposition(
+            kind=DispositionKind.TERMINAL,
+            reason="merged",
+            blocking_chain=["s3_object:s3://b/k"],
+        )
+
+
+# ---------------------------------------------------------------------------
 # §3.3 — spec and status are separate types
 # ---------------------------------------------------------------------------
 

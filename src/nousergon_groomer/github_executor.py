@@ -15,19 +15,57 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from .model_provider import ModelProvider
-from .models import DispositionKind, Item
+from .models import Disposition, DispositionKind, Item
 from .reconciler import ReconcilerResult
 
 _API_BASE = "https://api.github.com"
 
 _JUDGMENT_ACTIONS = frozenset({"fix_ci", "resolve_conflicts", "advance_draft"})
 
+#: Marks a groomer-authored comment as the one to update in place rather
+#: than re-post (§5.3 idempotency: re-running over identical BLOCKED state
+#: must not accumulate a fresh comment every cycle — alpha-engine-config#6500).
+BLOCKED_CHAIN_MARKER = "<!-- nousergon-groomer:blocked-chain -->"
+
 __all__ = [
+    "BLOCKED_CHAIN_MARKER",
     "ExecutorAbortError",
     "ExecutorError",
     "ExecutorResult",
     "GitHubExecutor",
 ]
+
+
+def render_blocked_comment(disposition: Disposition) -> str:
+    """Render a BLOCKED disposition's root-cause chain as a comment body.
+
+    Prefers the structured :attr:`Disposition.blocking_chain` (§3.4) so a
+    human reading one blocked item sees the whole chain to the root
+    unsatisfied condition, not just the direct dependency
+    (alpha-engine-config#6500) — the gap the policy's own clause registry
+    names: a PR blocked on a data condition itself blocked on a weekly SF run
+    must show the whole chain, with the real root visible rather than only
+    the intermediate link. Falls back to ``reason`` alone when the chain is
+    empty (e.g. an admission-denied BLOCKED, which is a WIP-queue
+    constraint, not a §3.4 dependency chain).
+    """
+    if disposition.blocking_chain:
+        root = disposition.blocking_chain[-1]
+        steps = "\n".join(
+            f"{i}. `{token}`" for i, token in enumerate(disposition.blocking_chain, start=1)
+        )
+        chain_note = (
+            "(single-link: the item's own dependency is the root cause)"
+            if len(disposition.blocking_chain) == 1
+            else f"(root cause: `{root}`)"
+        )
+        body = (
+            f"**Blocked** {chain_note}\n\n"
+            f"Full dependency chain (groom-sweep-policy §3.4):\n{steps}\n"
+        )
+    else:
+        body = f"**Blocked** — {disposition.reason or 'no reason recorded'}\n"
+    return f"{BLOCKED_CHAIN_MARKER}\n{body}"
 
 
 class ExecutorError(BaseModel):
@@ -45,6 +83,14 @@ class ExecutorResult(BaseModel):
     skipped: list[str]
     errors: list[ExecutorError]
     dry_run: bool
+
+    #: Item ids whose BLOCKED root-cause chain was posted or updated as a
+    #: sticky comment this pass (alpha-engine-config#6500). Distinct from
+    #: ``skipped``: a BLOCKED item performs no code action, but surfacing its
+    #: chain is itself a write, so counting it under ``skipped`` would hide
+    #: that a side effect happened. Empty in dry-run mode — nothing is
+    #: written; see the ``[dry-run]`` print instead.
+    blocked_surfaced: list[str] = []
 
 
 class ExecutorAbortError(Exception):
@@ -102,6 +148,7 @@ class GitHubExecutor:
         item_by_id = {item.id: item for item in items}
         executed: list[str] = []
         skipped: list[str] = []
+        blocked_surfaced: list[str] = []
         errors: list[ExecutorError] = []
 
         for item_disp in result.items:
@@ -109,8 +156,41 @@ class GitHubExecutor:
             kind = disposition.kind
             item_id = item_disp.item_id
 
-            if kind is DispositionKind.TERMINAL or kind is DispositionKind.BLOCKED:
+            if kind is DispositionKind.TERMINAL:
                 skipped.append(item_id)
+                continue
+
+            if kind is DispositionKind.BLOCKED:
+                item = item_by_id.get(item_id)
+                if item is None:
+                    errors.append(
+                        ExecutorError(
+                            item_id=item_id,
+                            action="surface_blocked_chain",
+                            error=f"item {item_id!r} not found in items list",
+                        )
+                    )
+                    continue
+                if self._dry_run:
+                    print(
+                        f"[dry-run] {item_id}: would surface blocked chain: "
+                        f"{disposition.reason}"
+                    )
+                    skipped.append(item_id)
+                    continue
+                try:
+                    self._surface_blocked_chain(item, repo, disposition)
+                    blocked_surfaced.append(item_id)
+                except ExecutorAbortError:
+                    raise
+                except Exception as exc:
+                    errors.append(
+                        ExecutorError(
+                            item_id=item_id,
+                            action="surface_blocked_chain",
+                            error=str(exc),
+                        )
+                    )
                 continue
 
             if kind is DispositionKind.UNDECIDABLE:
@@ -167,7 +247,57 @@ class GitHubExecutor:
             skipped=skipped,
             errors=errors,
             dry_run=self._dry_run,
+            blocked_surfaced=blocked_surfaced,
         )
+
+    def _surface_blocked_chain(self, item: Item, repo: str, disposition: Disposition) -> None:
+        """Post or update a sticky comment naming ``item``'s full blocking chain.
+
+        This is the rendering surface deliverable of alpha-engine-config#6500
+        (groom-sweep-policy §3.4): the transitive chain is already resolved
+        every pass by :class:`DependencyGraph.get_blocked_chain` and carried
+        structured on ``disposition.blocking_chain`` — this method is what
+        makes that visible to a human reading the item on GitHub, who
+        otherwise sees only the immediate label or linked issue with the real
+        root cause several hops away.
+
+        Idempotent by construction (§5.3): searches for an existing comment
+        carrying :data:`BLOCKED_CHAIN_MARKER` and edits it in place rather
+        than posting a new one, so re-running over unchanged BLOCKED state
+        does not accumulate duplicate comments each cycle.
+        """
+        body = render_blocked_comment(disposition)
+        existing_id = self._find_marker_comment(item.id, repo)
+        if existing_id is not None:
+            response = self._client.patch(
+                f"/repos/{repo}/issues/comments/{existing_id}",
+                json={"body": body},
+            )
+            self._raise_for_response(
+                response, f"update blocked-chain comment on #{item.id}"
+            )
+        else:
+            response = self._client.post(
+                f"/repos/{repo}/issues/{item.id}/comments",
+                json={"body": body},
+            )
+            self._raise_for_response(
+                response, f"post blocked-chain comment on #{item.id}"
+            )
+
+    def _find_marker_comment(self, item_id: str, repo: str) -> Optional[int]:
+        """Return the id of the existing marker comment on ``item_id``, or ``None``.
+
+        Issues and PRs share one comments surface in the GitHub REST API
+        (``/issues/{n}/comments`` serves both), so this needs no branch on
+        whether ``item_id`` names an issue or a PR.
+        """
+        response = self._client.get(f"/repos/{repo}/issues/{item_id}/comments")
+        self._raise_for_response(response, f"list comments on #{item_id}")
+        for comment in response.json():
+            if BLOCKED_CHAIN_MARKER in (comment.get("body") or ""):
+                return comment.get("id")
+        return None
 
     def _dispatch_action(self, action: str, item: Item, repo: str) -> None:
         handlers = {
