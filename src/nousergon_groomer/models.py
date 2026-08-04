@@ -72,7 +72,6 @@ class DependencyKind(str, enum.Enum):
     PR_TERMINAL = "pr_terminal"
     PIPELINE_RUN = "pipeline_run"
     DATE = "date"
-    LABEL_ABSENT = "label_absent"
 
 
 class DispositionKind(str, enum.Enum):

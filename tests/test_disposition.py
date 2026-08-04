@@ -34,7 +34,6 @@ def _world_full() -> ObservedWorld:
         terminal_items=set(),
         pipeline_runs=set(),
         today=None,
-        absent_labels=set(),
     )
 
 

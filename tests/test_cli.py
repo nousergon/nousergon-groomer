@@ -70,7 +70,6 @@ def _fixture_items() -> tuple[list[Item], ObservedWorld]:
         s3_prefixes=set(),
         terminal_items=set(),
         pipeline_runs=set(),
-        absent_labels=set(),
     )
     return items, world
 

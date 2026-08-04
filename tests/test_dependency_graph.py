@@ -19,7 +19,7 @@ def _issue(id, deps=None, state=ItemState.OPEN_ISSUE_ACTIONABLE):
 def _world():
     return ObservedWorld(
         s3_objects=set(), s3_prefixes=set(), terminal_items=set(),
-        pipeline_runs=set(), absent_labels=set(),
+        pipeline_runs=set(),
     )
 
 

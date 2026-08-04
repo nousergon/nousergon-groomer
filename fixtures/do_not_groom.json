@@ -12,8 +12,7 @@
     "s3_objects": [],
     "s3_prefixes": [],
     "terminal_items": [],
-    "pipeline_runs": [],
-    "absent_labels": []
+    "pipeline_runs": []
   },
   "expected": {
     "i1": {"kind": "terminal"}
