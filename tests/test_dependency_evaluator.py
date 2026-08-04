@@ -13,6 +13,8 @@ from nousergon_groomer.dependency_evaluator import (
 )
 from nousergon_groomer.models import Dependency, DependencyKind, Item, ItemKind, ItemState
 
+_LABEL_ABSENT_VALUE = "label_absent"
+
 
 def _dep(kind: DependencyKind, target: str) -> Dependency:
     return Dependency(kind=kind, target=target)
@@ -137,19 +139,19 @@ def test_date_rejects_malformed_target():
 
 
 # ---------------------------------------------------------------------------
-# LABEL_ABSENT
+# LABEL_ABSENT — removed (§3.5): a label is inside the loop's own write
+# authority, so a label-presence condition can never be a valid external
+# dependency. Kept as a negative test rather than deleted silently, so a
+# reintroduction of the kind (under this name or a narrower label-based one)
+# fails loud at construction rather than at review time.
 # ---------------------------------------------------------------------------
 
-def test_label_absent_satisfied():
-    dep = _dep(DependencyKind.LABEL_ABSENT, "gate:weekly-sf")
-    world = ObservedWorld(absent_labels={"gate:weekly-sf"})
-    assert evaluate_dependency(dep, world).satisfied is True
-
-
-def test_label_absent_unsatisfied_when_present():
-    dep = _dep(DependencyKind.LABEL_ABSENT, "gate:weekly-sf")
-    world = ObservedWorld(absent_labels=set())
-    assert evaluate_dependency(dep, world).satisfied is False
+def test_label_absent_kind_no_longer_constructible():
+    assert not hasattr(DependencyKind, "LABEL_ABSENT")
+    with pytest.raises(ValueError):
+        DependencyKind(_LABEL_ABSENT_VALUE)
+    with pytest.raises(ValueError):
+        Dependency(kind=_LABEL_ABSENT_VALUE, target="gate:weekly-sf")
 
 
 # ---------------------------------------------------------------------------

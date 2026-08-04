@@ -58,7 +58,6 @@ def _build_world(raw_world: dict) -> ObservedWorld:
         s3_prefixes=_set(raw_world.get("s3_prefixes")),
         terminal_items=_set(raw_world.get("terminal_items")),
         pipeline_runs=_set(raw_world.get("pipeline_runs")),
-        absent_labels=_set(raw_world.get("absent_labels")),
     )
 
 

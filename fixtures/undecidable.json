@@ -15,8 +15,7 @@
     "s3_objects": null,
     "s3_prefixes": null,
     "terminal_items": null,
-    "pipeline_runs": null,
-    "absent_labels": null
+    "pipeline_runs": null
   },
   "expected": {
     "i1": {"kind": "undecidable"}

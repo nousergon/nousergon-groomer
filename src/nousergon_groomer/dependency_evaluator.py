@@ -42,6 +42,12 @@ class ObservedWorld(BaseModel):
     and ``pr_terminal`` dependencies. ``pipeline_runs`` is the set of pipeline
     run ids that completed successfully. ``today`` is the wall-clock date used
     to resolve ``date`` dependencies (target date has arrived).
+
+    There is deliberately no label-based leaf condition here: a label is
+    written BY the loop itself (§3.5), so "blocked until label X is
+    absent/present" is not an external condition — it is always within the
+    loop's own write authority, and the correct disposition is ``ACT``
+    (write or remove the label), never ``BLOCKED``.
     """
 
     s3_objects: Optional[set[str]] = None
@@ -49,7 +55,6 @@ class ObservedWorld(BaseModel):
     terminal_items: Optional[set[str]] = None
     pipeline_runs: Optional[set[str]] = None
     today: Optional[_dt.date] = None
-    absent_labels: Optional[set[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -131,18 +136,6 @@ def evaluate_dependency(dep: Dependency, world: ObservedWorld) -> DependencyEval
         return DependencyEvaluation(
             dependency=dep, satisfied=arrived,
             reason="" if arrived else f"date {dep.target} not yet reached",
-        )
-
-    if kind is DependencyKind.LABEL_ABSENT:
-        if world.absent_labels is None:
-            return DependencyEvaluation(
-                dependency=dep, satisfied=False, undecidable=True,
-                reason="absent_labels not reported",
-            )
-        is_absent = dep.target in world.absent_labels
-        return DependencyEvaluation(
-            dependency=dep, satisfied=is_absent,
-            reason="" if is_absent else f"label {dep.target} is present",
         )
 
     # Totality: an unknown kind is a programming error, not a default.

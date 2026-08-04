@@ -17,8 +17,7 @@
     "s3_objects": [],
     "s3_prefixes": [],
     "terminal_items": [],
-    "pipeline_runs": [],
-    "absent_labels": []
+    "pipeline_runs": []
   },
   "expected": {
     "p1": {"kind": "act", "action": "automerge"}

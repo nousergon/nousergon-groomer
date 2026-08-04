@@ -5,6 +5,28 @@ All notable changes to `nousergon-groomer` are recorded here. Versions follow
 
 While the major version is `0`, the public API may change between minor versions.
 
+## [Unreleased]
+
+### Removed
+
+- **`DependencyKind.LABEL_ABSENT` and its evaluator branch** (§3.5 of
+  `groom-sweep-policy.md`: "a declared dependency names a condition no
+  action within the loop's own write authority would satisfy; if the loop
+  could satisfy it, the disposition is `act`"). A label is written BY the
+  loop itself, so a "blocked until label X is absent" dependency was a
+  forbidden state by construction — the loop could simply remove the label
+  rather than being blocked on it. `ObservedWorld.absent_labels` is removed
+  along with it: it had no other consumer. Any item that declared this kind
+  must be re-dispositioned as `ACT` (remove the label, or do the work the
+  label stood for) — not migrated to a narrower label-based kind, which
+  would reintroduce the same defect. This is a breaking change to the
+  `Dependency`/`ObservedWorld` schema: constructing a `Dependency` with the
+  removed kind now raises `ValidationError` at parse (§6.3 fail loud, not a
+  silent drop) rather than silently accepting it; `ObservedWorld.absent_labels`
+  is simply gone from the schema (pydantic's default `extra="ignore"` means a
+  caller still passing it gets no error, but the value is no longer read by
+  anything).
+
 ## [0.4.0] — 2026-08-04
 
 ### Changed
