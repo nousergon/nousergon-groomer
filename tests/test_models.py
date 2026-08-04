@@ -17,6 +17,8 @@ from nousergon_groomer.models import (
     ObservedGeneration,
     VerificationObligation,
     can_transition,
+    human_due_date,
+    human_owner,
     parse_dependency_declaration,
     passes_agency_test,
 )
@@ -105,6 +107,11 @@ def test_declaration_rejects_unqualified_issue_reference():
         ("pipeline_run:weekly-sf-20260804", DependencyKind.PIPELINE_RUN, "weekly-sf-20260804"),
         ("2026-08-10", DependencyKind.DATE, "2026-08-10"),
         ("milestone:m1", DependencyKind.MILESTONE_REACHED, "m1"),
+        (
+            "human:brianmcmahon:2026-08-15",
+            DependencyKind.HUMAN,
+            "brianmcmahon:2026-08-15",
+        ),
     ],
 )
 def test_declaration_parses_every_permitted_subject(raw, kind, target):
@@ -114,12 +121,60 @@ def test_declaration_parses_every_permitted_subject(raw, kind, target):
 
 
 # ---------------------------------------------------------------------------
+# §3.7 — a HUMAN dependency names the person and a due date
+# ---------------------------------------------------------------------------
+
+
+def test_human_declaration_rejects_bare_name_no_due_date():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        parse_dependency_declaration("human:brianmcmahon")
+
+
+def test_human_declaration_rejects_malformed_due_date():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        parse_dependency_declaration("human:brianmcmahon:2026-13-40")
+
+
+def test_human_typed_construction_rejects_bare_target():
+    """§3.7's shape guarantee also holds for typed construction, not only
+    the raw-string parser (mirrors how §3.1's agency guard is defence in
+    depth on both paths)."""
+    with pytest.raises(ValueError, match="owner.*due date|due date"):
+        Dependency(kind=DependencyKind.HUMAN, target="brianmcmahon")
+
+
+def test_human_owner_and_due_date_helpers():
+    dep = parse_dependency_declaration("human:brianmcmahon:2026-08-15")
+    assert human_owner(dep) == "brianmcmahon"
+    assert human_due_date(dep) == "2026-08-15"
+
+
+def test_human_owner_rejects_non_human_dependency():
+    dep = Dependency(kind=DependencyKind.DATE, target="2026-08-10")
+    with pytest.raises(ValueError, match="not DependencyKind.HUMAN"):
+        human_owner(dep)
+
+
+# ---------------------------------------------------------------------------
 # §3.5 — the agency test
 # ---------------------------------------------------------------------------
 
+#: A target that is valid for every DependencyKind's own shape validator, so
+#: this loop exercises "is this kind agency-safe" without also exercising
+#: each kind's independent shape rules (covered by their own tests above).
+_VALID_TARGET_FOR_KIND = {
+    DependencyKind.HUMAN: "brianmcmahon:2026-08-15",
+}
+
+
 def test_agency_test_passes_every_permitted_kind():
     for kind in DependencyKind:
-        dep = Dependency(kind=kind, target="x")
+        target = _VALID_TARGET_FOR_KIND.get(kind, "x")
+        dep = Dependency(kind=kind, target=target)
         assert passes_agency_test(dep) is True
 
 

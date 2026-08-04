@@ -5,6 +5,51 @@ All notable changes to `nousergon-groomer` are recorded here. Versions follow
 
 While the major version is `0`, the public API may change between minor versions.
 
+## [0.11.0] — 2026-08-04
+
+### Added
+
+- **`DependencyKind.HUMAN`** (§3.7, alpha-engine-config#6311). A dependency on
+  a person is legal per §3.5's agency test (a person is outside the loop's own
+  write authority), and §3.7 additionally requires it to carry both the
+  person's name AND a due date — never a bare name. The declaration grammar
+  is `human:<owner>:<YYYY-MM-DD>`, parsed by the existing
+  `parse_dependency_declaration` write-boundary chokepoint into
+  `Dependency(kind=HUMAN, target="<owner>:<due-date>")`. A HUMAN dependency
+  missing either half, or carrying a due date that does not parse as an
+  ISO-8601 date, is rejected at declaration — both via the raw-string parser
+  and via a dedicated model validator guarding typed construction
+  (`Dependency(kind=DependencyKind.HUMAN, target=...)`), mirroring how §3.5's
+  agency test is checked on both paths.
+
+  `human_owner(dep)` / `human_due_date(dep)` split the target back out for
+  callers; both raise `ValueError` if called on a non-`HUMAN` dependency.
+
+  `DependencyKind.HUMAN` is added to `_AGENCY_EXTERNAL_KINDS`, so
+  `test_agency_allowlist_covers_every_dependency_kind`'s pin continues to
+  hold with no drift.
+
+  **Evaluation (`dependency_evaluator.evaluate_dependency`).** A HUMAN
+  dependency is never auto-satisfied by anything the world reports — the only
+  thing that clears it is the named person acting out of band (typically by
+  closing or dispositioning the item itself, which
+  `disposition.compute_disposition`'s terminal-stage check short-circuits on
+  before dependency evaluation ever runs). `satisfied` is therefore always
+  `False`; the returned `reason` names the due date and, when `world.today`
+  is past it, is prefixed `OVERDUE:` so a caller building the §7 "human
+  dependency past due date" signal does not have to re-parse the target
+  itself. `world.today` absent yields `undecidable=True`, matching DATE's own
+  honest-degradation rule rather than silently assuming not-yet-due.
+
+  The measured defect this is one piece of closing: 17 open
+  `alpha-engine-config` issues resting on an operator gate with no owner
+  field, no due date, and no surface aggregating them
+  (`groom-sweep-policy.md` §3.7's "Observed"). This package supplies the
+  typed declaration and evaluation; routing to the Decision Queue, aging past
+  due date, and the §7 count-by-person row are harness-side
+  (`alpha-engine-config-I6311`) — this package makes no network calls and
+  owns no GitHub client.
+
 ## [0.10.0] — 2026-08-04
 
 ### Added

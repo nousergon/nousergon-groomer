@@ -53,6 +53,8 @@ from .models import (
     ObservedGeneration,
     VerificationObligation,
     can_transition,
+    human_due_date,
+    human_owner,
     parse_dependency_declaration,
     passes_agency_test,
 )
@@ -81,6 +83,8 @@ __all__ = [
     "DispositionKind",
     "VerificationObligation",
     "can_transition",
+    "human_due_date",
+    "human_owner",
     "parse_dependency_declaration",
     "passes_agency_test",
     "effective_stage",
@@ -106,4 +110,4 @@ __all__ = [
     "ReconcilerResult",
 ]
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"

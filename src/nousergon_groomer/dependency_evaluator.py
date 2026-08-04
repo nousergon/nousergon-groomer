@@ -21,7 +21,14 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from .models import Dependency, DependencyEvaluation, DependencyKind, Item
+from .models import (
+    Dependency,
+    DependencyEvaluation,
+    DependencyKind,
+    Item,
+    human_due_date,
+    human_owner,
+)
 
 # ---------------------------------------------------------------------------
 # ObservedWorld — a snapshot of external conditions
@@ -152,6 +159,39 @@ def evaluate_dependency(dep: Dependency, world: ObservedWorld) -> DependencyEval
             dependency=dep, satisfied=reached,
             reason="" if reached else f"milestone {dep.target} not reached",
         )
+
+    if kind is DependencyKind.HUMAN:
+        # §3.7: a HUMAN dependency is never auto-satisfied by anything the
+        # world reports — the only thing that ever clears it is the named
+        # person acting, out of band (typically by closing or dispositioning
+        # the item itself, which `disposition.compute_disposition` checks for
+        # BEFORE dependency evaluation ever runs — see its terminal-stage
+        # precedence). So `satisfied` is always False here: this evaluator
+        # answers "has the world observed satisfaction?", never "should a
+        # human act now?", and the honest answer for a human dependency is
+        # always no.
+        #
+        # What *is* derived from the world is whether the due date has
+        # passed, which the reason string carries so a caller building the
+        # §7 "human dependency past due date" signal does not have to
+        # re-parse the target. `world.today` absent means the harness did
+        # not report a clock — undecidable, per the same honest-degradation
+        # rule DATE already follows, rather than silently assuming not-yet.
+        if world.today is None:
+            return DependencyEvaluation(
+                dependency=dep, satisfied=False, undecidable=True,
+                reason="today not reported — overdue status of human "
+                       f"dependency on {human_owner(dep)} is unknowable",
+            )
+        due = _dt.date.fromisoformat(human_due_date(dep))
+        overdue = world.today > due
+        owner = human_owner(dep)
+        reason = (
+            f"OVERDUE: waiting on {owner}, due {due.isoformat()}"
+            if overdue else
+            f"waiting on {owner}, due {due.isoformat()}"
+        )
+        return DependencyEvaluation(dependency=dep, satisfied=False, reason=reason)
 
     # Totality: an unknown kind is a programming error, not a default.
     raise NotImplementedError(f"evaluate_dependency: unsupported DependencyKind {kind!r}")

@@ -139,6 +139,52 @@ def test_date_rejects_malformed_target():
 
 
 # ---------------------------------------------------------------------------
+# HUMAN (§3.7, alpha-engine-config#6311)
+# ---------------------------------------------------------------------------
+
+def test_human_never_satisfied_before_due_date():
+    """A HUMAN dependency is never auto-satisfied by the world — only the
+    named person acting (out of band) clears it. Before the due date it is
+    unsatisfied and not overdue."""
+    dep = _dep(DependencyKind.HUMAN, "brianmcmahon:2026-08-15")
+    world = ObservedWorld(today=_dt.date(2026, 8, 10))
+    ev = evaluate_dependency(dep, world)
+    assert ev.satisfied is False
+    assert ev.undecidable is False
+    assert "OVERDUE" not in ev.reason
+    assert "brianmcmahon" in ev.reason
+
+
+def test_human_still_unsatisfied_but_flagged_overdue_past_due_date():
+    dep = _dep(DependencyKind.HUMAN, "brianmcmahon:2026-08-01")
+    world = ObservedWorld(today=_dt.date(2026, 8, 10))
+    ev = evaluate_dependency(dep, world)
+    assert ev.satisfied is False
+    assert ev.undecidable is False
+    assert "OVERDUE" in ev.reason
+    assert "brianmcmahon" in ev.reason
+
+
+def test_human_undecidable_when_today_not_reported():
+    dep = _dep(DependencyKind.HUMAN, "brianmcmahon:2026-08-15")
+    world = ObservedWorld(today=None)
+    ev = evaluate_dependency(dep, world)
+    assert ev.undecidable is True
+    assert ev.satisfied is False
+
+
+def test_human_is_always_blocking_while_open():
+    """A HUMAN dependency's permanent satisfied=False means is_item_blocked
+    reports the item blocked for as long as it is declared and open — the
+    item only stops being blocked by leaving the stage entirely (closed by
+    the named person), never by the reconciler observing satisfaction."""
+    item = _item([_dep(DependencyKind.HUMAN, "brianmcmahon:2026-08-15")])
+    world = ObservedWorld(today=_dt.date(2026, 8, 10))
+    blocked, _ = is_item_blocked(item, world)
+    assert blocked is True
+
+
+# ---------------------------------------------------------------------------
 # MILESTONE_REACHED (issue #33)
 # ---------------------------------------------------------------------------
 
