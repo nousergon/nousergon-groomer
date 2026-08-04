@@ -1,4 +1,4 @@
-"""Contract tests for the GitHub snapshot adapter (issue #22)."""
+"""Contract tests for the GitHub snapshot adapter (issue #22, config#6320)."""
 from __future__ import annotations
 
 import logging
@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nousergon_groomer.github_snapshot import GitHubSnapshot, SnapshotError
-from nousergon_groomer.models import ItemKind, ItemState
+from nousergon_groomer.github_snapshot import GitHubSnapshot, IssueFieldConformance, SnapshotError
+from nousergon_groomer.models import Dependency, DependencyKind, ItemKind, ItemState
 
 
 def _mock_response(status_code: int, json_data: object, headers: dict | None = None) -> MagicMock:
@@ -25,13 +25,53 @@ def _issue(
     title: str = "Issue",
     labels: list[str] | None = None,
     body: str = "",
+    total_blocked_by: int | None = None,
+    sub_issues_total: int | None = None,
+    field_values: list[dict] | None = None,
 ) -> dict:
-    return {
+    raw = {
         "number": number,
         "title": title,
         "body": body,
         "labels": [{"name": label} for label in (labels or [])],
     }
+    if total_blocked_by is not None:
+        raw["issue_dependencies_summary"] = {
+            "blocked_by": total_blocked_by,
+            "total_blocked_by": total_blocked_by,
+            "blocking": 0,
+            "total_blocking": 0,
+        }
+    if sub_issues_total is not None:
+        raw["sub_issues_summary"] = {
+            "total": sub_issues_total,
+            "completed": 0,
+            "percent_completed": 0,
+        }
+    if field_values is not None:
+        raw["issue_field_values"] = field_values
+    return raw
+
+
+def _native_blocker(
+    number: int,
+    *,
+    repo_full_name: str,
+    state: str = "open",
+    is_pr: bool = False,
+) -> dict:
+    """One entry of a native ``dependencies/blocked_by`` (or ``sub_issues``)
+    response — a full issue/PR-shaped object with its own ``repository``.
+    """
+    raw = {
+        "number": number,
+        "state": state,
+        "title": f"blocker {number}",
+        "repository": {"full_name": repo_full_name},
+    }
+    if is_pr:
+        raw["pull_request"] = {}
+    return raw
 
 
 def _pr(
@@ -109,6 +149,7 @@ def test_clean_green_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) 
         _mock_response(200, [_pr(10, mergeable=True, ci_state="SUCCESS")]),
         _mock_response(200, []),
         _mock_response(200, []),
+        _mock_response(200, []),  # blocked_by for PR 10 — always probed
     ]
 
     items, _world = snapshot.fetch("owner/repo")
@@ -124,6 +165,7 @@ def test_draft_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> Non
         _mock_response(200, [_pr(11, draft=True)]),
         _mock_response(200, []),
         _mock_response(200, []),
+        _mock_response(200, []),  # blocked_by for PR 11 — always probed
     ]
 
     items, _world = snapshot.fetch("owner/repo")
@@ -138,6 +180,7 @@ def test_dirty_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> Non
         _mock_response(200, [_pr(12, mergeable=False, ci_state="SUCCESS")]),
         _mock_response(200, []),
         _mock_response(200, []),
+        _mock_response(200, []),  # blocked_by for PR 12 — always probed
     ]
 
     items, _world = snapshot.fetch("owner/repo")
@@ -150,6 +193,7 @@ def test_red_ci_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -> No
         _mock_response(200, [_pr(13, mergeable=True, ci_state="FAILURE")]),
         _mock_response(200, []),
         _mock_response(200, []),
+        _mock_response(200, []),  # blocked_by for PR 13 — always probed
     ]
 
     items, _world = snapshot.fetch("owner/repo")
@@ -163,6 +207,7 @@ def test_pending_ci_pr_state(snapshot: GitHubSnapshot, mock_client: MagicMock) -
         _mock_response(200, [_pr(14, mergeable=True, ci_state="PENDING")]),
         _mock_response(200, []),
         _mock_response(200, []),
+        _mock_response(200, []),  # blocked_by for PR 14 — always probed
     ]
 
     items, _world = snapshot.fetch("owner/repo")
@@ -194,6 +239,7 @@ def test_issue_with_linked_open_pr_is_waiting(
         _mock_response(200, [_pr(22, body="Fixes #21")]),
         _mock_response(200, []),
         _mock_response(200, []),
+        _mock_response(200, []),  # blocked_by for PR 22 — always probed
     ]
 
     items, _world = snapshot.fetch("owner/repo")
@@ -226,6 +272,7 @@ def test_returned_items_are_valid(snapshot: GitHubSnapshot, mock_client: MagicMo
         ),
         _mock_response(200, []),
         _mock_response(200, []),
+        _mock_response(200, []),  # blocked_by for PR 31 — always probed
     ]
 
     items, _world = snapshot.fetch("owner/repo")
@@ -280,6 +327,7 @@ def test_pr_from_list_with_null_mergeable_enriched_by_detail_endpoint(
         _mock_response(200, []),               # closed issues
         _mock_response(200, []),               # closed PRs
         _mock_response(200, detail_pr),         # per-PR detail GET
+        _mock_response(200, []),               # blocked_by for PR 99 — always probed
     ]
 
     items, _world = snapshot.fetch("owner/repo")
@@ -306,7 +354,13 @@ def test_terminal_items_from_closed_and_merged(
     ]
 
     _items, world = snapshot.fetch("owner/repo")
-    assert world.terminal_items == {"40", "41"}
+    # Bare numbers are preserved for backward compatibility; qualified
+    # (owner/name#number) twins are added alongside for every closed item
+    # so same-repo ISSUE_TERMINAL/PR_TERMINAL declarations using the
+    # qualified convention (config#6320) resolve without a blocked_by probe.
+    assert world.terminal_items == {
+        "40", "41", "owner/repo#40", "owner/repo#41",
+    }
 
 
 def test_pr_enrichment_failure_logs_warning_and_falls_back(
@@ -337,6 +391,7 @@ def test_pr_enrichment_failure_logs_warning_and_falls_back(
                 RuntimeError("detail fetch exploded")
             ),
         ),
+        _mock_response(200, []),               # blocked_by for PR 98 — always probed
     ]
 
     with caplog.at_level(logging.WARNING):
@@ -474,3 +529,296 @@ def test_check_runs_fetch_failure_degrades_to_pending_and_logs(caplog):
     with caplog.at_level("WARNING"):
         assert snap._fetch_ci_state("o/r", "deadbeef") is None
     assert "check-runs fetch failed" in caplog.text
+
+
+# --- config#6320: native issue dependencies, sub-issues, issue fields ---
+
+
+def test_native_dependency_populates_declared_dependencies(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    """Deliverable 1: a blocked_by edge becomes an ISSUE_TERMINAL Dependency,
+    replacing what a private harness would otherwise regex-parse from a body.
+    """
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(50, total_blocked_by=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(
+            200, [_native_blocker(5, repo_full_name="owner/repo")]
+        ),  # blocked_by for issue 50
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    issue = items[0]
+    assert issue.declared_dependencies == [
+        Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="owner/repo#5")
+    ]
+
+
+def test_native_dependency_cross_repo_identity_from_response_body(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    """Regression guard for the config#6320 gotcha: ``GET .../issues/{n}``
+    silently follows a transfer, so repo attribution for a dependency's
+    target MUST come from the blocked_by entry's own ``repository.full_name``
+    — never from the repo the caller requested, and never from the number
+    alone (which collides across repos). Here the blocker's number (5)
+    matches nothing meaningful in the requested repo; only the qualifying
+    ``repository.full_name`` in the response distinguishes it.
+    """
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(51, total_blocked_by=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(
+            200, [_native_blocker(5, repo_full_name="other-owner/other-repo")]
+        ),
+    ]
+
+    items, _world = snapshot.fetch("requested-owner/requested-repo")
+    issue = items[0]
+    dep = issue.declared_dependencies[0]
+    # The qualified target names the repo the RESPONSE reported, not the one
+    # requested — a test built from the requested repo alone (e.g.
+    # "requested-owner/requested-repo#5") would pass even if the adapter
+    # silently ignored a cross-repo transfer.
+    assert dep.target == "other-owner/other-repo#5"
+    assert "requested-owner/requested-repo#5" != dep.target
+
+
+def test_native_dependency_pr_blocker_kind_is_pr_terminal(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(52, total_blocked_by=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(
+            200, [_native_blocker(6, repo_full_name="owner/repo", is_pr=True)]
+        ),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    dep = items[0].declared_dependencies[0]
+    assert dep.kind is DependencyKind.PR_TERMINAL
+    assert dep.target == "owner/repo#6"
+
+
+def test_closed_native_blocker_merged_into_terminal_items(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    """A blocker's terminal-ness is read straight off the blocked_by
+    response's own ``state`` field — including for a blocker living in a
+    DIFFERENT repo than the one fetched, without a second fetch of that
+    repo's closed items.
+    """
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(53, total_blocked_by=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(
+            200,
+            [_native_blocker(7, repo_full_name="other-owner/other-repo", state="closed")],
+        ),
+    ]
+
+    _items, world = snapshot.fetch("owner/repo")
+    assert "other-owner/other-repo#7" in world.terminal_items
+
+
+def test_zero_blocked_by_summary_skips_the_probe(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(54, total_blocked_by=0)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    assert mock_client.get.call_count == 4
+    assert items[0].declared_dependencies == []
+
+
+def test_malformed_native_dependency_entry_logged_and_skipped(
+    snapshot: GitHubSnapshot, mock_client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(55, total_blocked_by=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, [{"number": 8, "state": "open"}]),  # no repository key
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        items, _world = snapshot.fetch("owner/repo")
+
+    assert items[0].declared_dependencies == []
+    assert any(
+        "malformed native dependency entry" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_sub_issues_populate_sub_issue_ids(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(60, sub_issues_total=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(
+            200, [_native_blocker(61, repo_full_name="owner/repo")]
+        ),  # sub_issues for issue 60
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    assert items[0].sub_issue_ids == ["owner/repo#61"]
+
+
+def test_sub_issues_not_probed_when_summary_zero(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(62, sub_issues_total=0)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    assert mock_client.get.call_count == 4
+    assert items[0].sub_issue_ids == []
+
+
+def test_custom_fields_surfaced_generically(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    """Deliverable 2 (read side): field values are passed through keyed by
+    name, with no interpretation of what any particular field means — that
+    is the §3.1 write-boundary chokepoint's job (issue #6309), not this
+    adapter's.
+    """
+    mock_client.get.side_effect = [
+        _mock_response(
+            200,
+            [
+                _issue(
+                    63,
+                    field_values=[
+                        {
+                            "issue_field_id": 1,
+                            "issue_field_name": "Priority",
+                            "data_type": "single_select",
+                            "value": "High",
+                        }
+                    ],
+                )
+            ],
+        ),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+    ]
+
+    items, _world = snapshot.fetch("owner/repo")
+    assert items[0].custom_fields == {"Priority": "High"}
+
+
+def test_blocked_by_fetch_failure_degrades_to_no_dependencies_and_logs(
+    snapshot: GitHubSnapshot, mock_client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(56, total_blocked_by=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(500, {"message": "boom"}),  # blocked_by fetch fails
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        items, _world = snapshot.fetch("owner/repo")
+
+    assert items[0].declared_dependencies == []
+    assert any(
+        "blocked_by fetch failed" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_sub_issues_fetch_failure_degrades_to_empty_and_logs(
+    snapshot: GitHubSnapshot, mock_client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(64, sub_issues_total=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(500, {"message": "boom"}),  # sub_issues fetch fails
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        items, _world = snapshot.fetch("owner/repo")
+
+    assert items[0].sub_issue_ids == []
+    assert any(
+        "sub_issues fetch failed" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_malformed_sub_issue_entry_logged_and_skipped(
+    snapshot: GitHubSnapshot, mock_client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    mock_client.get.side_effect = [
+        _mock_response(200, [_issue(65, sub_issues_total=1)]),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, []),
+        _mock_response(200, [{"number": 66}]),  # no repository key
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        items, _world = snapshot.fetch("owner/repo")
+
+    assert items[0].sub_issue_ids == []
+    assert any(
+        "sub-issue entry" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_fetch_issue_field_conformance_reports_usage_against_cap(
+    snapshot: GitHubSnapshot, mock_client: MagicMock
+) -> None:
+    """Deliverable 2 (budgeting) / closes-when: a conformance row reports
+    issue-field slots used against the 25 cap."""
+    mock_client.get.side_effect = [
+        _mock_response(
+            200,
+            [
+                {"id": 1, "name": "Priority"},
+                {"id": 2, "name": "Start date"},
+                {"id": 3, "name": "Target date"},
+                {"id": 4, "name": "Effort"},
+            ],
+        ),
+    ]
+
+    conformance = snapshot.fetch_issue_field_conformance("nousergon")
+    assert conformance == IssueFieldConformance(
+        org="nousergon",
+        cap=25,
+        field_names=["Effort", "Priority", "Start date", "Target date"],
+    )
+    assert conformance.used == 4
+    assert conformance.free == 21
+    assert conformance.conformance_row() == (
+        "issue-fields[nousergon]: 4/25 used (21 free) — "
+        "Effort, Priority, Start date, Target date"
+    )

@@ -13,7 +13,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import warnings
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -307,6 +307,27 @@ class Item(BaseModel):
     ci_green: Optional[bool] = None
     security_threads: int = 0
     observed_generation: Optional[ObservedGeneration] = None
+
+    #: Org-level issue-field values observed on this item (config#6320
+    #: deliverable 2), keyed by field name (``issue_field_name`` in the
+    #: GitHub API response). Read-only passthrough of whatever GitHub
+    #: reports — this package creates no fields and assigns no meaning to
+    #: any particular name; interpreting a specific field (predicate, owner,
+    #: due date) is the write-boundary chokepoint's job (§3.1, issue #6309),
+    #: not the snapshot adapter's. Empty when the item carries no field
+    #: values, which is indistinguishable from "not probed" only because
+    #: GitHub always reports this surface inline — never gated behind a
+    #: conditional fetch the way dependencies and sub-issues are.
+    custom_fields: dict[str, Any] = {}
+
+    #: Qualified ids (``owner/name#number``) of this item's own sub-issues
+    #: (config#6320 deliverable 3), populated only when GitHub reports at
+    #: least one via ``sub_issues_summary``. Epic/child containment is a
+    #: distinct relationship from a declared ``Dependency`` — it is not
+    #: walked by :mod:`dependency_graph`, which follows only
+    #: ``ISSUE_TERMINAL`` / ``PR_TERMINAL`` "depends on" edges. This field
+    #: feeds whichever consumer implements §3.4's epic-progress semantics.
+    sub_issue_ids: list[str] = []
 
     # -- derived properties ------------------------------------------------
 
