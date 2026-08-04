@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from nousergon_groomer.dependency_evaluator import ObservedWorld
 from nousergon_groomer.lane_classifier import MergeLane, classify_lane
-from nousergon_groomer.models import Dependency, DependencyKind, Item, ItemKind, ItemState
+from nousergon_groomer.models import (
+    Change,
+    ChangeCondition,
+    Dependency,
+    DependencyKind,
+    Item,
+    ItemStage,
+)
 
 
 def _world(**kw) -> ObservedWorld:
@@ -16,14 +23,32 @@ def _world(**kw) -> ObservedWorld:
     return ObservedWorld(**defaults)
 
 
-def _pr(state=ItemState.OPEN_CLEAN_GREEN, **kw):
-    defaults = {"id": "p1", "kind": ItemKind.PR, "state": state}
+def _pr(condition=ChangeCondition.CLEAN, **kw):
+    """An item in flight, carrying a change in ``condition``.
+
+    The cleanliness facts live on the change now (§3): ``mergeable``,
+    ``ci_green`` and ``security_threads`` describe the pull request rendering
+    the stage, not the unit of intended change itself.
+    """
+    item_id = kw.pop("id", "p1")
+    change = Change(
+        ref=item_id,
+        condition=condition,
+        mergeable=kw.pop("mergeable", None),
+        ci_green=kw.pop("ci_green", None),
+        security_threads=kw.pop("security_threads", 0),
+    )
+    defaults = {
+        "id": item_id,
+        "stage": kw.pop("stage", ItemStage.IN_FLIGHT),
+        "change": change,
+    }
     defaults.update(kw)
     return Item(**defaults)
 
 
 def _issue(**kw):
-    defaults = {"id": "i1", "kind": ItemKind.ISSUE, "state": ItemState.OPEN_ISSUE_ACTIONABLE}
+    defaults = {"id": "i1", "stage": ItemStage.PROPOSED}
     defaults.update(kw)
     return Item(**defaults)
 
@@ -64,7 +89,7 @@ def test_standing_exception_lane_passes():
 # ---------------------------------------------------------------------------
 
 def test_draft_fails_gate_a():
-    item = _pr(ItemState.OPEN_DRAFT, is_draft=True, mergeable=True, ci_green=True,
+    item = _pr(ChangeCondition.DRAFT, mergeable=True, ci_green=True,
                labels=["groom-reviewed"])
     result = classify_lane(item)
     assert result.eligible is False
@@ -127,14 +152,16 @@ def test_declared_dependency_without_a_world_fails_gate_a():
 
 
 def test_not_mergeable_fails_gate_a():
-    item = _pr(ItemState.OPEN_DIRTY, mergeable=False, ci_green=True, labels=["groom-reviewed"])
+    item = _pr(ChangeCondition.CONFLICTED, mergeable=False, ci_green=True,
+               labels=["groom-reviewed"])
     result = classify_lane(item)
     assert result.eligible is False
     assert "mergeable_clean" in result.gate_a.failed_checks
 
 
 def test_red_ci_fails_gate_a():
-    item = _pr(ItemState.OPEN_RED_CI, mergeable=True, ci_green=False, labels=["groom-reviewed"])
+    item = _pr(ChangeCondition.CI_RED, mergeable=True, ci_green=False,
+               labels=["groom-reviewed"])
     result = classify_lane(item)
     assert result.eligible is False
     assert "ci_green" in result.gate_a.failed_checks
@@ -181,21 +208,36 @@ def test_multiple_lanes_fails_gate_b():
 
 
 # ---------------------------------------------------------------------------
-# Non-PR and terminal
+# Items with no change, and stages past in_flight
 # ---------------------------------------------------------------------------
 
-def test_non_pr_not_eligible():
+def test_item_with_no_change_is_not_eligible():
     item = _issue()
     result = classify_lane(item)
     assert result.eligible is False
-    assert "not a PR" in result.reason
+    assert "carries no change" in result.reason
+    assert result.gate_a.failed_checks == ["no_change"]
 
 
-def test_merged_pr_not_eligible():
-    item = _pr(ItemState.MERGED, mergeable=True, ci_green=True, labels=["groom-reviewed"])
+def test_intent_record_of_an_in_flight_unit_is_not_eligible():
+    """The record holding the change is the one classified — not its twin.
+
+    Both records are the same item at the same stage; only one of them can
+    answer "is this mergeable?", and it is the one holding the pull request.
+    """
+    item = Item(id="i1", stage=ItemStage.IN_FLIGHT, change_ref="p1",
+                labels=["groom-reviewed"])
     result = classify_lane(item)
-    # Gate A checks mergeable/ci which are True, but the PR is merged —
-    # the classifier doesn't special-case terminal; the reconciler does.
-    # The classifier is a pure function over the Item fields; it reports
-    # eligibility based on the fields, not the lifecycle.
+    assert result.eligible is False
+    assert result.gate_a.failed_checks == ["no_change"]
+
+
+def test_merged_item_is_classified_on_its_fields_not_its_stage():
+    item = _pr(mergeable=True, ci_green=True, labels=["groom-reviewed"],
+               stage=ItemStage.MERGED)
+    result = classify_lane(item)
+    # Gate A checks mergeable/ci which are True, but the item has merged —
+    # the classifier doesn't special-case the stage; the reconciler does.
+    # The classifier is a pure function over the item's fields; it reports
+    # eligibility from them, not from the lifecycle.
     assert result.gate_a is not None

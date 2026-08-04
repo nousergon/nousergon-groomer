@@ -9,7 +9,14 @@ from nousergon_groomer.github_executor import (
     ExecutorAbortError,
     GitHubExecutor,
 )
-from nousergon_groomer.models import Disposition, DispositionKind, Item, ItemKind, ItemState
+from nousergon_groomer.models import (
+    Change,
+    ChangeCondition,
+    Disposition,
+    DispositionKind,
+    Item,
+    ItemStage,
+)
 from nousergon_groomer.reconciler import ItemDisposition, ReconcilerResult
 
 
@@ -22,10 +29,10 @@ def _mock_response(status_code: int, json_data: object | None = None, text: str 
 
 
 def _issue(item_id: str = "1", **kw) -> Item:
+    """An item with no change yet — the shape ``create_pr`` acts on."""
     defaults = {
         "id": item_id,
-        "kind": ItemKind.ISSUE,
-        "state": ItemState.OPEN_ISSUE_ACTIONABLE,
+        "stage": ItemStage.PROPOSED,
         "title": f"Issue {item_id}",
     }
     defaults.update(kw)
@@ -33,13 +40,18 @@ def _issue(item_id: str = "1", **kw) -> Item:
 
 
 def _pr(item_id: str = "10", **kw) -> Item:
+    """An item in flight — the shape every change-scoped action acts on."""
+    change = Change(
+        ref=item_id,
+        condition=kw.pop("condition", ChangeCondition.CLEAN),
+        mergeable=kw.pop("mergeable", True),
+        ci_green=kw.pop("ci_green", True),
+    )
     defaults = {
         "id": item_id,
-        "kind": ItemKind.PR,
-        "state": ItemState.OPEN_CLEAN_GREEN,
+        "stage": kw.pop("stage", ItemStage.IN_FLIGHT),
         "title": f"PR {item_id}",
-        "mergeable": True,
-        "ci_green": True,
+        "change": change,
     }
     defaults.update(kw)
     return Item(**defaults)
@@ -175,7 +187,7 @@ def test_fix_ci_calls_model_provider(
     ]
     mock_client.post.return_value = _mock_response(201, {"sha": "commit456"})
     mock_client.patch.return_value = _mock_response(200, {})
-    item = _pr("15", state=ItemState.OPEN_RED_CI, ci_green=False)
+    item = _pr("15", condition=ChangeCondition.CI_RED, ci_green=False)
     result = _result(("15", Disposition(kind=DispositionKind.ACT, action="fix_ci")))
 
     out = executor.execute(result, [item], repo="owner/repo")
@@ -211,7 +223,7 @@ def test_resolve_conflicts_calls_model_provider(
     ]
     mock_client.post.return_value = _mock_response(201, {"sha": "commit456"})
     mock_client.patch.return_value = _mock_response(200, {})
-    item = _pr("16", state=ItemState.OPEN_DIRTY, mergeable=False)
+    item = _pr("16", condition=ChangeCondition.CONFLICTED, mergeable=False)
     result = _result(("16", Disposition(kind=DispositionKind.ACT, action="resolve_conflicts")))
 
     out = executor.execute(result, [item], repo="owner/repo")
@@ -226,7 +238,7 @@ def test_advance_draft_calls_model_provider(
 ) -> None:
     mock_model.complete.return_value = "READY: labels look good"
     mock_client.patch.return_value = _mock_response(200, {"draft": False})
-    item = _pr("17", state=ItemState.OPEN_DRAFT, is_draft=True)
+    item = _pr("17", condition=ChangeCondition.DRAFT)
     result = _result(("17", Disposition(kind=DispositionKind.ACT, action="advance_draft")))
 
     out = executor.execute(result, [item], repo="owner/repo")
@@ -250,9 +262,9 @@ def test_execute_routes_all_act_handlers(
         items = [
             _pr("1"),
             _issue("2"),
-            _pr("3", state=ItemState.OPEN_RED_CI),
-            _pr("4", state=ItemState.OPEN_DIRTY),
-            _pr("5", state=ItemState.OPEN_DRAFT, is_draft=True),
+            _pr("3", condition=ChangeCondition.CI_RED),
+            _pr("4", condition=ChangeCondition.CONFLICTED),
+            _pr("5", condition=ChangeCondition.DRAFT),
         ]
         result = _result(
             ("1", Disposition(kind=DispositionKind.ACT, action="automerge")),
@@ -284,7 +296,7 @@ def test_dry_run_produces_no_side_effects(
     items = [
         _pr("1"),
         _issue("2"),
-        _pr("3", state=ItemState.OPEN_RED_CI),
+        _pr("3", condition=ChangeCondition.CI_RED),
     ]
     result = _result(
         ("1", Disposition(kind=DispositionKind.ACT, action="automerge")),
@@ -320,7 +332,7 @@ def test_blocked_dispositions_are_skipped(executor: GitHubExecutor, mock_client:
 
 
 def test_terminal_dispositions_are_skipped(executor: GitHubExecutor, mock_client: MagicMock) -> None:
-    item = _pr("1", state=ItemState.MERGED)
+    item = _pr("1", stage=ItemStage.MERGED)
     result = _result(
         ("1", Disposition(kind=DispositionKind.TERMINAL, reason="merged")),
     )
@@ -356,7 +368,7 @@ def test_undecidable_dispositions_recorded_as_errors(
 
 def test_fix_ci_without_model_provider_is_skipped(mock_client: MagicMock) -> None:
     executor = GitHubExecutor(token="test-token", http_client=mock_client)
-    item = _pr("20", state=ItemState.OPEN_RED_CI, ci_green=False)
+    item = _pr("20", condition=ChangeCondition.CI_RED, ci_green=False)
     result = _result(("20", Disposition(kind=DispositionKind.ACT, action="fix_ci")))
 
     out = executor.execute(result, [item], repo="owner/repo")

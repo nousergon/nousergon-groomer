@@ -4,15 +4,19 @@ from __future__ import annotations
 import pytest
 
 from nousergon_groomer.models import (
+    STAGE_ORDER,
+    Change,
+    ChangeCondition,
     Dependency,
     DependencyEvaluation,
     DependencyKind,
     Disposition,
     DispositionKind,
     Item,
-    ItemKind,
-    ItemState,
+    ItemStage,
     ObservedGeneration,
+    VerificationObligation,
+    can_transition,
 )
 
 # ---------------------------------------------------------------------------
@@ -99,41 +103,161 @@ def test_writing_status_does_not_mutate_spec():
 def test_item_carries_spec_not_status():
     """An Item carries declared dependencies (spec), not evaluated dispositions (status)."""
     dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
-    item = Item(id="i1", kind=ItemKind.ISSUE, state=ItemState.OPEN_ISSUE_ACTIONABLE,
-                declared_dependencies=[dep])
+    item = Item(id="i1", stage=ItemStage.PROPOSED, declared_dependencies=[dep])
     assert item.declared_dependencies == [dep]
     assert item.observed_generation is None  # status is not on the spec
 
 
 # ---------------------------------------------------------------------------
-# ItemState totality — every value is a known string
+# §3 — one item with stages (alpha-engine-config#6307)
 # ---------------------------------------------------------------------------
 
-def test_item_state_values_are_strings():
-    for state in ItemState:
-        assert isinstance(state.value, str)
-        assert state.value  # non-empty
+def test_the_stage_enum_carries_all_seven_values():
+    """closes-when 1: ``ItemKind`` is gone and ``Item.stage`` has all seven."""
+    assert [stage.value for stage in ItemStage] == [
+        "proposed", "ready", "in_flight", "merged", "verified", "done", "abandoned",
+    ]
 
 
-def test_item_state_has_do_not_groom():
-    assert ItemState.DO_NOT_GROOM == "do_not_groom"
+def test_item_kind_no_longer_exists():
+    """The two-population model is not deprecated — it is removed.
+
+    Leaving a shim would let a consumer keep asking "is this an issue or a
+    PR?", which is the question §3 abolishes: both answers describe the same
+    unit at different points in its life.
+    """
+    import nousergon_groomer.models as models
+
+    assert not hasattr(models, "ItemKind")
+    assert not hasattr(models, "ItemState")
 
 
-def test_item_is_terminal_for_merged_closed_do_not_groom():
-    for state in (ItemState.MERGED, ItemState.CLOSED, ItemState.DO_NOT_GROOM):
-        item = Item(id="x", kind=ItemKind.ISSUE, state=state)
-        assert item.is_terminal
+def test_stage_order_is_the_forward_progression():
+    assert [stage.value for stage in STAGE_ORDER] == [
+        "proposed", "ready", "in_flight", "merged", "verified", "done",
+    ]
+    assert ItemStage.ABANDONED not in STAGE_ORDER
 
 
-def test_item_is_not_terminal_for_open_states():
-    for state in (
-        ItemState.OPEN_CLEAN_GREEN, ItemState.OPEN_RED_CI, ItemState.OPEN_DIRTY,
-        ItemState.OPEN_DRAFT, ItemState.OPEN_PENDING_CI,
-        ItemState.OPEN_ISSUE_ACTIONABLE, ItemState.OPEN_ISSUE_BLOCKED,
-        ItemState.OPEN_ISSUE_WAITING,
-    ):
-        item = Item(id="x", kind=ItemKind.ISSUE, state=state)
-        assert not item.is_terminal
+def test_merged_is_not_terminal_and_verified_is_reachable():
+    """closes-when 3, at the model.
+
+    Terminal-at-merge is what leaves a post-merge verification obligation with
+    nowhere to live (§3.8), and F7 measures lead time to ``verified``.
+    """
+    assert ItemStage.MERGED.is_terminal is False
+    assert can_transition(ItemStage.MERGED, ItemStage.VERIFIED) is True
+    assert can_transition(ItemStage.VERIFIED, ItemStage.DONE) is True
+
+
+def test_only_done_and_abandoned_are_terminal():
+    terminal = {stage for stage in ItemStage if stage.is_terminal}
+    assert terminal == {ItemStage.DONE, ItemStage.ABANDONED}
+
+
+def test_abandoned_is_reachable_from_every_non_terminal_stage():
+    for stage in ItemStage:
+        if stage.is_terminal:
+            continue
+        assert can_transition(stage, ItemStage.ABANDONED) is True
+
+
+def test_nothing_leaves_a_terminal_stage():
+    for terminal in (ItemStage.DONE, ItemStage.ABANDONED):
+        for stage in ItemStage:
+            assert can_transition(terminal, stage) is False
+
+
+def test_a_stage_does_not_transition_to_itself():
+    for stage in ItemStage:
+        assert can_transition(stage, stage) is False
+
+
+def test_backward_transitions_are_rejected():
+    assert can_transition(ItemStage.IN_FLIGHT, ItemStage.PROPOSED) is False
+    assert can_transition(ItemStage.VERIFIED, ItemStage.MERGED) is False
+
+
+def test_item_is_terminal_only_at_done_and_abandoned():
+    for stage in (ItemStage.DONE, ItemStage.ABANDONED):
+        assert Item(id="x", stage=stage).is_terminal
+    for stage in (ItemStage.PROPOSED, ItemStage.READY, ItemStage.MERGED,
+                  ItemStage.VERIFIED):
+        assert not Item(id="x", stage=stage).is_terminal
+
+
+def test_do_not_groom_is_a_flag_not_a_stage():
+    """An excluded item keeps the stage it is really at (§9 carve-out 2)."""
+    item = Item(id="x", stage=ItemStage.PROPOSED, do_not_groom=True)
+    assert item.stage is ItemStage.PROPOSED
+    assert item.is_terminal is False
+
+
+# ---------------------------------------------------------------------------
+# §3 — Change is a condition of one stage, not an item
+# ---------------------------------------------------------------------------
+
+def test_change_draftness_is_derived_from_its_condition():
+    """One surface for one fact — a separate boolean could disagree with it."""
+    assert Change(ref="p1", condition=ChangeCondition.DRAFT).is_draft is True
+    assert Change(ref="p1", condition=ChangeCondition.CLEAN).is_draft is False
+
+
+def test_change_rejects_an_empty_ref():
+    with pytest.raises(ValueError, match="non-empty"):
+        Change(ref="  ", condition=ChangeCondition.CLEAN)
+
+
+def test_in_flight_requires_a_change_or_a_ref():
+    """"In flight" means a change exists (§3); an item claiming it must name one."""
+    with pytest.raises(ValueError, match="neither a change nor a change_ref"):
+        Item(id="x", stage=ItemStage.IN_FLIGHT)
+
+
+def test_change_ref_is_filled_from_the_change():
+    item = Item(id="x", stage=ItemStage.IN_FLIGHT,
+                change=Change(ref="p9", condition=ChangeCondition.CLEAN))
+    assert item.change_ref == "p9"
+    assert item.carries_change is True
+
+
+def test_a_pre_change_stage_cannot_carry_a_change():
+    """A change existing IS the in_flight stage — the two cannot disagree."""
+    with pytest.raises(ValueError, match="carries a change at stage"):
+        Item(id="x", stage=ItemStage.PROPOSED,
+             change=Change(ref="p1", condition=ChangeCondition.CLEAN))
+
+
+def test_an_intent_record_carries_a_ref_without_the_change():
+    item = Item(id="i1", stage=ItemStage.IN_FLIGHT, change_ref="p1")
+    assert item.carries_change is False
+    assert item.change_ref == "p1"
+
+
+# ---------------------------------------------------------------------------
+# §3.8 — the post-merge verification obligation
+# ---------------------------------------------------------------------------
+
+def test_verification_obligation_requires_a_deadline():
+    """§3.6: absence of a stated residence is a rejected declaration, never a
+    default of forever."""
+    dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
+    with pytest.raises(ValueError):
+        VerificationObligation(predicate=dep)
+
+
+def test_verification_obligation_rejects_a_non_date_deadline():
+    dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
+    with pytest.raises(ValueError, match="not an ISO-8601 date"):
+        VerificationObligation(predicate=dep, deadline="soon")
+
+
+def test_verification_obligation_names_a_revert_action():
+    dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
+    obligation = VerificationObligation(predicate=dep, deadline="2026-08-10")
+    assert obligation.revert_action == "revert"
+    with pytest.raises(ValueError, match="non-empty action name"):
+        VerificationObligation(predicate=dep, deadline="2026-08-10", revert_action=" ")
 
 
 # ---------------------------------------------------------------------------
@@ -165,19 +289,17 @@ def test_observed_generation_head_sha_defaults_none():
 # ---------------------------------------------------------------------------
 
 def test_item_label_set_hash_is_order_independent():
-    item1 = Item(id="i1", kind=ItemKind.ISSUE, state=ItemState.OPEN_ISSUE_ACTIONABLE,
-                 labels=["a", "b"])
-    item2 = Item(id="i1", kind=ItemKind.ISSUE, state=ItemState.OPEN_ISSUE_ACTIONABLE,
-                 labels=["b", "a"])
+    item1 = Item(id="i1", stage=ItemStage.PROPOSED, labels=["a", "b"])
+    item2 = Item(id="i1", stage=ItemStage.PROPOSED, labels=["b", "a"])
     assert item1.label_set_hash == item2.label_set_hash
 
 
 def test_item_deps_hash_is_order_independent():
     dep1 = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k1")
     dep2 = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k2")
-    item1 = Item(id="i1", kind=ItemKind.ISSUE, state=ItemState.OPEN_ISSUE_ACTIONABLE,
+    item1 = Item(id="i1", stage=ItemStage.PROPOSED,
                  declared_dependencies=[dep1, dep2])
-    item2 = Item(id="i1", kind=ItemKind.ISSUE, state=ItemState.OPEN_ISSUE_ACTIONABLE,
+    item2 = Item(id="i1", stage=ItemStage.PROPOSED,
                  declared_dependencies=[dep2, dep1])
     assert item1.deps_hash == item2.deps_hash
 
@@ -191,33 +313,33 @@ def _gate_dep(target="s3://b/gate-artifact.json"):
 
 
 def test_has_declared_dependency_is_true_when_a_dependency_is_declared():
-    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+    item = Item(id="i1", stage=ItemStage.PROPOSED,
                 labels=["gate:weekly-sf"], declared_dependencies=[_gate_dep()])
     assert item.has_declared_dependency is True
 
 
 def test_has_declared_dependency_is_false_for_a_bare_gate_label():
     """A gate:* label declares nothing — label presence is not a declaration."""
-    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+    item = Item(id="i1", stage=ItemStage.PROPOSED,
                 labels=["gate:weekly-sf"])
     assert item.has_declared_dependency is False
 
 
 def test_unrepresented_gate_labels_names_a_projection_with_no_declaration():
-    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+    item = Item(id="i1", stage=ItemStage.PROPOSED,
                 labels=["gate:weekly-sf", "gate:operator", "groom-reviewed"])
     assert item.unrepresented_gate_labels == ["gate:weekly-sf", "gate:operator"]
 
 
 def test_unrepresented_gate_labels_empty_once_the_item_declares_its_condition():
     """The label survives as a projection; it is no longer unbacked."""
-    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+    item = Item(id="i1", stage=ItemStage.PROPOSED,
                 labels=["gate:weekly-sf"], declared_dependencies=[_gate_dep()])
     assert item.unrepresented_gate_labels == []
 
 
 def test_unrepresented_gate_labels_empty_for_a_non_gated_item():
-    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+    item = Item(id="i1", stage=ItemStage.PROPOSED,
                 labels=["groom-reviewed"])
     assert item.unrepresented_gate_labels == []
 
@@ -229,7 +351,7 @@ def test_has_gate_label_is_deprecated_and_reads_declared_dependencies():
     the answer comes from the declaration. The old implementation returned
     False here, because it only ever looked at ``labels``.
     """
-    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+    item = Item(id="i1", stage=ItemStage.PROPOSED,
                 labels=["groom-reviewed"], declared_dependencies=[_gate_dep()])
     with pytest.deprecated_call():
         assert item.has_gate_label is True
@@ -242,14 +364,14 @@ def test_has_gate_label_still_true_for_an_unenriched_gate_labelled_item():
     a state use; a snapshot item has no declarations yet, so the shim must
     still select it.
     """
-    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+    item = Item(id="i1", stage=ItemStage.PROPOSED,
                 labels=["gate:weekly-sf"])
     with pytest.deprecated_call():
         assert item.has_gate_label is True
 
 
 def test_has_gate_label_false_for_an_item_with_neither():
-    item = Item(id="i1", kind=ItemKind.PR, state=ItemState.OPEN_DRAFT,
+    item = Item(id="i1", stage=ItemStage.PROPOSED,
                 labels=["groom-reviewed"])
     with pytest.deprecated_call():
         assert item.has_gate_label is False

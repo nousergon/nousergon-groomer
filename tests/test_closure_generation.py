@@ -32,8 +32,7 @@ from nousergon_groomer.models import (
     DependencyKind,
     DispositionKind,
     Item,
-    ItemKind,
-    ItemState,
+    ItemStage,
 )
 from nousergon_groomer.observed_gen import (
     GenerationStore,
@@ -48,8 +47,7 @@ from nousergon_groomer.reconciler import Reconciler, ReconcilerConfig
 def _issue(item_id: str, deps: list[Dependency] | None = None, **kw) -> Item:
     defaults = {
         "id": item_id,
-        "kind": ItemKind.ISSUE,
-        "state": ItemState.OPEN_ISSUE_ACTIONABLE,
+        "stage": ItemStage.PROPOSED,
         "declared_dependencies": deps or [],
     }
     defaults.update(kw)

@@ -1,11 +1,11 @@
 {
-  "description": "An item marked do-not-groom → TERMINAL (§9 carve-out 2: untouched)",
+  "description": "An item marked do_not_groom → TERMINAL (§9 carve-out 2: untouched). Exclusion is a flag, not a stage: this item is genuinely `proposed`, and overwriting that with a pseudo-stage would destroy the only record of where it is.",
   "items": [
     {
       "id": "i1",
-      "kind": "issue",
-      "state": "do_not_groom",
-      "title": "Do not groom this"
+      "stage": "proposed",
+      "title": "Do not groom this",
+      "do_not_groom": true
     }
   ],
   "world": {
@@ -15,6 +15,6 @@
     "pipeline_runs": []
   },
   "expected": {
-    "i1": {"kind": "terminal"}
+    "i1": {"kind": "terminal", "stage": "ready"}
   }
 }

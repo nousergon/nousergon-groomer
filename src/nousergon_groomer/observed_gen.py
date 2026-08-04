@@ -40,7 +40,7 @@ from typing import Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-from .models import Disposition, Item, ObservedGeneration
+from .models import Disposition, Item, ItemStage, ObservedGeneration
 
 __all__ = [
     "GenerationStore",
@@ -394,6 +394,7 @@ def record_evaluation(
     body: Optional[str] = None,
     closure_state: Optional[list[str]] = None,
     disposition: Optional[Disposition] = None,
+    stage: Optional[ItemStage] = None,
     observed_at: Optional[str] = None,
 ) -> ObservedGeneration:
     """Persist the current input fingerprint into ``store`` after a cycle.
@@ -402,16 +403,23 @@ def record_evaluation(
     at ``generation``. Returns the persisted :class:`ObservedGeneration`.
 
     ``observed_at`` is the caller's timestamp for this cycle, used to stamp
-    dependencies observed satisfied for the first time (§3.6). It is a
-    parameter rather than a clock read because the reconciler must remain a
-    pure function of its inputs (§5.4) — a hidden clock would make two
-    identical cycles produce different records, and the determinism tests
-    would be the first casualty.
+    dependencies observed satisfied for the first time (§3.6) and stages
+    entered for the first time (§3). It is a parameter rather than a clock read
+    because the reconciler must remain a pure function of its inputs (§5.4) — a
+    hidden clock would make two identical cycles produce different records, and
+    the determinism tests would be the first casualty.
 
-    Previously-recorded satisfaction timestamps are **carried forward**. The
-    moment a dependency was first observed satisfied is the measurement;
-    re-stamping it every cycle would overwrite the only copy of it with the
-    current time and quietly destroy F7's detection latency.
+    ``stage`` is the item's **effective** stage this cycle. Passing it is what
+    makes F7 (lead time, intent → verified) and F6 (residence) computable:
+    both are differences between entries in ``stage_entered_at``, and nothing
+    else in the system records when an item entered a stage that is derived
+    rather than stored.
+
+    Previously-recorded satisfaction and stage-entry timestamps are **carried
+    forward**. The moment a dependency was first observed satisfied, and the
+    moment an item first reached a stage, are the measurements; re-stamping
+    either every cycle would overwrite the only copy of it with the current
+    time and quietly destroy F7 — every latency would read as zero.
     """
     fp = compute_fingerprint(
         item, head_sha=head_sha, body=body, closure_state=closure_state
@@ -421,6 +429,16 @@ def record_evaluation(
     if closure_state is not None and observed_at is not None:
         for token in newly_satisfied(closure_state, previous):
             satisfied_at.setdefault(token, observed_at)
+
+    # First entry wins. `setdefault`, not assignment: an item can regress —
+    # a closed change sends it from `in_flight` back to `ready` — and lead
+    # time is measured from the original intent, not the latest attempt.
+    # Re-stamping would silently shorten exactly the measurements that had a
+    # setback, which is the population F7 exists to expose.
+    stage_entered_at: dict[str, str] = dict(previous.stage_entered_at) if previous else {}
+    if stage is not None and observed_at is not None:
+        stage_entered_at.setdefault(stage.value, observed_at)
+
     record = ObservedGeneration(
         item_id=item.id,
         generation=generation,
@@ -436,6 +454,12 @@ def record_evaluation(
         satisfied_tokens=(
             satisfied_tokens_of(closure_state) if closure_state is not None else []
         ),
+        # A caller that did not supply a stage carries the previous one forward
+        # rather than blanking it: "this writer did not say" is not "the item
+        # has no stage", and overwriting with None would destroy the only
+        # record of where it was.
+        stage=stage.value if stage is not None else (previous.stage if previous else None),
+        stage_entered_at=stage_entered_at,
     )
     store.put(item.id, record)
     return record

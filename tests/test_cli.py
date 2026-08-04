@@ -8,10 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nousergon_groomer.cli import (
+    _COL_CHANGE,
     _COL_DISPOSITION,
     _COL_ID,
-    _COL_KIND,
-    _COL_STATE,
+    _COL_STAGE,
     format_dry_run_table,
     main,
 )
@@ -19,11 +19,11 @@ from nousergon_groomer.config import load_config, write_default_config
 from nousergon_groomer.dependency_evaluator import ObservedWorld
 from nousergon_groomer.github_executor import ExecutorResult
 from nousergon_groomer.models import (
+    Change,
+    ChangeCondition,
     Dependency,
     DependencyKind,
     Item,
-    ItemKind,
-    ItemState,
 )
 from nousergon_groomer.observed_gen import GenerationStore
 from nousergon_groomer.reconciler import Reconciler, ReconcilerConfig, ReconcilerResult
@@ -38,30 +38,34 @@ def _fixture_items() -> tuple[list[Item], ObservedWorld]:
     items = [
         Item(
             id="i1",
-            kind=ItemKind.ISSUE,
-            state=ItemState.OPEN_ISSUE_ACTIONABLE,
-            title="Actionable issue",
+            stage="proposed",
+            title="Ready item",
         ),
         Item(
             id="p1",
-            kind=ItemKind.PR,
-            state=ItemState.OPEN_CLEAN_GREEN,
-            title="Green PR",
-            mergeable=True,
-            ci_green=True,
+            stage="in_flight",
+            title="Item whose change is clean and green",
+            change=Change(
+                ref="p1",
+                condition=ChangeCondition.CLEAN,
+                mergeable=True,
+                ci_green=True,
+            ),
         ),
         Item(
             id="p2",
-            kind=ItemKind.PR,
-            state=ItemState.OPEN_RED_CI,
-            title="Red CI PR",
-            ci_green=False,
+            stage="in_flight",
+            title="Item whose change has red CI",
+            change=Change(
+                ref="p2",
+                condition=ChangeCondition.CI_RED,
+                ci_green=False,
+            ),
         ),
         Item(
             id="i2",
-            kind=ItemKind.ISSUE,
-            state=ItemState.OPEN_ISSUE_ACTIONABLE,
-            title="Blocked issue",
+            stage="proposed",
+            title="Blocked item",
             declared_dependencies=[dep],
         ),
     ]
@@ -253,8 +257,8 @@ def test_dry_run_table_format_is_parseable():
     lines = [line for line in table.splitlines() if line.strip()]
     header = lines[0]
     assert header.startswith("ID")
-    assert "KIND" in header
-    assert "STATE" in header
+    assert "STAGE" in header
+    assert "CHANGE" in header
     assert "DISPOSITION" in header
     assert "ACTION" in header
     assert "REASON" in header
@@ -270,12 +274,17 @@ def test_dry_run_table_format_is_parseable():
 
     for line in data_lines:
         item_id = line[:_COL_ID].strip()
-        kind = line[_COL_ID : _COL_ID + _COL_KIND].strip()
+        stage = line[_COL_ID : _COL_ID + _COL_STAGE].strip()
+        change = line[_COL_ID + _COL_STAGE : _COL_ID + _COL_STAGE + _COL_CHANGE].strip()
         disposition = line[
-            _COL_ID + _COL_KIND + _COL_STATE : _COL_ID + _COL_KIND + _COL_STATE + _COL_DISPOSITION
+            _COL_ID + _COL_STAGE + _COL_CHANGE :
+            _COL_ID + _COL_STAGE + _COL_CHANGE + _COL_DISPOSITION
         ].strip()
         assert item_id in {"i1", "i2", "p1", "p2"}
-        assert kind in {"issue", "pr"}
+        # The STAGE column shows the EFFECTIVE stage, so the unblocked i1 reads
+        # `ready` although `proposed` is what was recorded.
+        assert stage in {"proposed", "ready", "in_flight"}
+        assert change in {"—", "clean", "ci_red"}
         assert disposition in {"ACT", "BLOCKED", "TERMINAL", "UNDECIDABLE"}
 
 

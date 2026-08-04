@@ -5,6 +5,110 @@ All notable changes to `nousergon-groomer` are recorded here. Versions follow
 
 While the major version is `0`, the public API may change between minor versions.
 
+## [0.9.0] — 2026-08-04
+
+### Changed — BREAKING
+
+- **One item with stages, replacing `ItemKind` (`ISSUE | PR`) and the flat
+  `ItemState`.** `Item.stage` is an `ItemStage`:
+  `proposed → ready → in_flight → merged → verified → done`, with `abandoned`
+  reachable from any stage. `ItemKind` and `ItemState` are **removed**, not
+  deprecated — a shim would let a consumer keep asking "is this an issue or a
+  PR?", which is the question this change abolishes.
+
+  **Why this is one change and not four.** An issue and its pull request are
+  one unit of intended change at two points in its life, and modelling them as
+  two populations is the shared root of four separate defects that had each
+  been treated separately:
+
+  | Modelled as two | Consequence |
+  |---|---|
+  | The PR has its own blocked state | A branch conflict — a property of the in-flight stage — gets declared a dependency of the *item*, and the item parks |
+  | The PR is terminal at merge | Verification that can only happen after merge has nowhere to live, so it is held as a pre-merge gate that can never clear |
+  | The PR has its own resting states | "Draft" becomes a place to leave things rather than a stage the cycle must exit |
+  | Issues and PRs are separate populations | Outcomes are written for one and absent for the other, and the link between them is something a sweep checks rather than an invariant |
+
+  At last measurement most blocked PRs in the fleet were merely conflicted or
+  behind `main` — the loop's own branch decay, declared as a blocker on the
+  work — and four fifths of the open queue was in draft with not one draft in
+  a clean merge state. Neither population was a bug in a rule; both were the
+  representation admitting them.
+
+- **The PR sub-states are now `ChangeCondition` values on `Item.change`,** not
+  item states. `draft`, `conflicted`, `ci_red`, `ci_pending` and `clean` are
+  conditions of the `in_flight` stage. A conflicted change is an item **in
+  flight whose change is conflicted**, and its disposition is `ACT`
+  (`resolve_conflicts`) — resolving it is inside the loop's own write
+  authority, so it is work, never a dependency. Likewise a draft is
+  `ACT(advance_draft)`: it is a transient condition inside the cycle that
+  opened the change, not a resting state.
+
+- **`merged` is not terminal.** Only `done` and `abandoned` are.
+  `Item.verification` carries a `VerificationObligation` — a predicate, a
+  **required** deadline, and a named revert action — for a criterion that can
+  only be satisfied by an artifact the merged code itself produces. Held as a
+  pre-merge dependency such a criterion is structurally unsatisfiable: the item
+  rests forever on a condition its own resting prevents. It is now an
+  obligation on the `merged → verified` transition. An item awaiting one is
+  `BLOCKED` naming the predicate and its deadline; past the deadline it is
+  `ACT(<revert_action>)`, because expiry is an event with an action rather than
+  another interval of silent waiting.
+
+- **Two stages are derived, never stored.** `stage.effective_stage(item, graph,
+  world)` resolves `proposed → ready` (nothing it declares is unsatisfied) and
+  `merged → verified` (the obligation is discharged). Storing readiness would
+  be asserting blocked-ness, which is the property the §3 rewrite exists to
+  remove; a recorded `ready` is re-derived rather than trusted. An item with an
+  **undecidable** dependency stays at `proposed`: unconfirmed is not ready, and
+  reporting it otherwise would enter it in the conversion denominator on a fact
+  nobody established.
+
+- **Per-stage entry timestamps.** `ObservedGeneration` gains `stage` and
+  `stage_entered_at` (an `ItemStage` value → ISO-8601 map), written to the
+  status store every cycle. **Lead time and residence are computed from this
+  map and from nothing else** — neither is recoverable from GitHub, which
+  records when an issue opened and when a PR merged and nothing at all about
+  when an item became *ready*, because readiness is derived and only the loop
+  deriving it can know the moment it flipped. First entry wins and re-entry
+  never re-stamps: an item can regress when a change is closed, and re-stamping
+  would silently shorten exactly the measurements that had a setback.
+
+- **`ItemDisposition.stage`** and **`ReconcilerResult.stage_counts`** are
+  emitted every cycle. The counts are seeded with every stage at zero, because
+  a stage absent from the map and a stage with no items are different claims
+  and only one of them is honest.
+
+- **Admission and the lane classifier are stage-scoped.** `current_wip` counts
+  items at `in_flight` carrying a change — one predicate, where there was an
+  enumeration of five PR states, which is where an exemption class hides.
+  `can_admit` gates on the pre-change stages. `classify_lane` reports
+  `no_change` for an item with nothing to merge, which is a different answer
+  from "not clean".
+
+- **The snapshot adapter emits staged items.** An open pull request is always
+  `in_flight`; an issue a pull request names is the **same item** at
+  `in_flight`, carrying `change_ref` rather than being a second population
+  "waiting on review". The two records are one unit, and the disposition
+  function defers to whichever holds the change instead of producing two
+  verdicts about one piece of work — including for WIP, which charges the unit
+  once.
+
+### Migration
+
+Replace `Item(id=…, kind=ItemKind.ISSUE, state=ItemState.OPEN_ISSUE_ACTIONABLE)`
+with `Item(id=…, stage=ItemStage.PROPOSED)`, and
+`Item(kind=ItemKind.PR, state=ItemState.OPEN_RED_CI, mergeable=…, ci_green=…)`
+with `Item(stage=ItemStage.IN_FLIGHT, change=Change(ref=…,
+condition=ChangeCondition.CI_RED, mergeable=…, ci_green=…))`. Route on
+`ItemDisposition.stage` and `Item.change.condition` rather than on `item.kind`
+and `item.state`. `DO_NOT_GROOM` is now the `do_not_groom` flag, which is a
+declared exclusion rather than a stage — an excluded item is at some real point
+in its life, and a pseudo-stage would destroy the record of it.
+
+Zero external adopters at the time of writing (stars = 0), which is why the
+breaking change lands now rather than accumulating a compatibility surface
+around a model known to be wrong.
+
 ## [0.8.0] — 2026-08-04
 
 ### Added

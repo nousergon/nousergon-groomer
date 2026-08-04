@@ -1,0 +1,50 @@
+{
+  "description": "alpha-engine-config#6307 closes-when 3. `merged` is not terminal and `verified` is reachable (§3.8). m1 declares a post-merge verification obligation its own merged code produces: it merged, the predicate has not held, its deadline has not passed — so it is at `merged`, BLOCKED on the predicate, and NOT terminal. m2 declares the same predicate and the world reports it satisfied, so it has advanced to `verified` — the stage F7 measures lead time to. m3's obligation has passed its deadline unmet, so it is force-dispositioned to the named revert rather than resting for another interval (§3.6). m4 declares no obligation at all: the checks that permitted the merge were the verification, so it passes straight to `verified`.",
+  "items": [
+    {
+      "id": "m1",
+      "stage": "merged",
+      "title": "Merged; the artifact its own code writes has not appeared yet",
+      "verification": {
+        "predicate": {"kind": "s3_object", "target": "s3://ne-artifacts/verify/m1.json"},
+        "deadline": "2026-08-10"
+      }
+    },
+    {
+      "id": "m2",
+      "stage": "merged",
+      "title": "Merged; its post-merge artifact is present",
+      "verification": {
+        "predicate": {"kind": "s3_object", "target": "s3://ne-artifacts/verify/m2.json"},
+        "deadline": "2026-08-10"
+      }
+    },
+    {
+      "id": "m3",
+      "stage": "merged",
+      "title": "Merged; the obligation went past its deadline unmet",
+      "verification": {
+        "predicate": {"kind": "s3_object", "target": "s3://ne-artifacts/verify/m3.json"},
+        "deadline": "2026-08-01"
+      }
+    },
+    {
+      "id": "m4",
+      "stage": "merged",
+      "title": "Merged with nothing verifiable only after merge"
+    }
+  ],
+  "world": {
+    "s3_objects": ["s3://ne-artifacts/verify/m2.json"],
+    "s3_prefixes": [],
+    "terminal_items": [],
+    "pipeline_runs": [],
+    "today": "2026-08-04"
+  },
+  "expected": {
+    "m1": {"kind": "blocked", "stage": "merged"},
+    "m2": {"kind": "terminal", "stage": "verified"},
+    "m3": {"kind": "act", "action": "revert", "stage": "merged"},
+    "m4": {"kind": "terminal", "stage": "verified"}
+  }
+}
