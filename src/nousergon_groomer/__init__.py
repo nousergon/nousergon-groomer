@@ -32,10 +32,12 @@ from .config import (
 )
 from .disposition import compute_disposition
 from .github_executor import (
+    BLOCKED_CHAIN_MARKER,
     ExecutorAbortError,
     ExecutorError,
     ExecutorResult,
     GitHubExecutor,
+    render_blocked_comment,
 )
 from .github_snapshot import GitHubSnapshot, IssueFieldConformance, SnapshotError
 from .model_provider import ModelError, ModelProvider, OpenAICompatibleProvider
@@ -91,10 +93,12 @@ __all__ = [
     "GenerationStore",
     "GenerationStoreProtocol",
     "PersistentGenerationStore",
+    "BLOCKED_CHAIN_MARKER",
     "ExecutorAbortError",
     "ExecutorError",
     "ExecutorResult",
     "GitHubExecutor",
+    "render_blocked_comment",
     "GitHubSnapshot",
     "IssueFieldConformance",
     "Item",

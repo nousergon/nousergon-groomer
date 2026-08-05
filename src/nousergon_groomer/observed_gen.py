@@ -450,6 +450,9 @@ def record_evaluation(
         disposition_kind=disposition.kind.value if disposition is not None else None,
         disposition_reason=disposition.reason if disposition is not None else None,
         disposition_action=disposition.action if disposition is not None else None,
+        disposition_blocking_chain=(
+            list(disposition.blocking_chain) if disposition is not None else []
+        ),
         dependency_satisfied_at=satisfied_at,
         satisfied_tokens=(
             satisfied_tokens_of(closure_state) if closure_state is not None else []

@@ -387,6 +387,10 @@ def test_merged_awaiting_verification_is_blocked_not_terminal():
     assert d.kind is DispositionKind.BLOCKED
     assert "awaiting post-merge verification" in d.reason
     assert "2026-08-10" in d.reason
+    # alpha-engine-config#6500: the obligation's own predicate is a
+    # single-token structured chain (nothing upstream of it to walk, unlike
+    # a §3.4 DependencyGraph chain, but the same field carries it).
+    assert d.blocking_chain == ["s3_object:s3://b/verify.json"]
 
 
 def test_merged_with_a_satisfied_predicate_is_verified_and_terminal():
@@ -493,6 +497,33 @@ def test_transitive_block_surfaces_root_cause():
     # The chain should mention both the issue_terminal dep and the s3 root
     assert "i2" in d.reason
     assert "s3://b/k" in d.reason
+    # alpha-engine-config#6500: the same chain is also structured data, not
+    # only prose a consumer would have to parse back out of `reason` — and it
+    # names the FULL chain (both links), not just i1's direct dependency.
+    assert d.blocking_chain == ["issue_terminal:i2", "s3_object:s3://b/k"]
+
+
+def test_transitive_block_three_levels_chain_names_every_link():
+    """A -> B -> C: the structured chain names all three links, not just A -> B."""
+    dep3 = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/root")
+    i3 = _item(id="i3", declared_dependencies=[dep3])
+    dep2 = Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i3")
+    i2 = _item(id="i2", declared_dependencies=[dep2])
+    dep1 = Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i2")
+    i1 = _item(id="i1", declared_dependencies=[dep1])
+    world = _world_full()
+    graph = _graph([i1, i2, i3], world)
+    d = compute_disposition(i1, graph, world)
+    assert d.kind is DispositionKind.BLOCKED
+    assert d.blocking_chain == [
+        "issue_terminal:i2",
+        "issue_terminal:i3",
+        "s3_object:s3://b/root",
+    ]
+    # The direct dependency alone (i2) is not the whole story — the root
+    # cause (s3://b/root) must be reachable from the rendered chain.
+    assert d.blocking_chain[-1] != d.blocking_chain[0]
+    assert "s3://b/root" in d.blocking_chain[-1]
 
 
 # ---------------------------------------------------------------------------
