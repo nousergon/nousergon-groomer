@@ -77,6 +77,10 @@ def sample_generation(item_id: str = "repo#1") -> ObservedGeneration:
         disposition_kind="blocked",
         disposition_reason="blocked by s3_object:s3://bucket/blocker",
         disposition_action=None,
+        # alpha-engine-config#6500: a populated, multi-link value — a backend
+        # that drops this field (or flattens a list to a scalar) must fail
+        # test_every_field_round_trips, not pass by matching an empty default.
+        disposition_blocking_chain=["issue_terminal:repo#2", "s3_object:s3://bucket/blocker"],
         dependency_satisfied_at={"s3_object:s3://bucket/other": "2026-08-04T00:00:00+00:00"},
         satisfied_tokens=["s3_object:s3://bucket/other"],
         stage="in_flight",
@@ -208,6 +212,14 @@ class GenerationStoreContract:
         assert by_id["repo#2"].disposition.kind is DispositionKind.BLOCKED, (
             "a skipped item must report the disposition it reached, not a hole"
         )
+        # alpha-engine-config#6500: repo#3 is blocked *transitively* through
+        # repo#2 — a skipped cycle must still report the full chain to the
+        # root leaf, not just repo#3's own direct dependency on repo#2.
+        assert by_id["repo#3"].skipped is True
+        assert by_id["repo#3"].disposition.blocking_chain == [
+            "issue_terminal:repo#2",
+            f"s3_object:{_LEAF}",
+        ]
 
     # -- 4. a transitive leaf flip defeats the skip ------------------------
 

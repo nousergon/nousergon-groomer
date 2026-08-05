@@ -113,6 +113,9 @@ def print_executor_summary(result: ExecutorResult) -> None:
     print(f"Executed: {len(result.executed)}")
     if result.executed:
         print(f"  {', '.join(result.executed)}")
+    print(f"Blocked (chain surfaced): {len(result.blocked_surfaced)}")
+    if result.blocked_surfaced:
+        print(f"  {', '.join(result.blocked_surfaced)}")
     print(f"Skipped: {len(result.skipped)}")
     if result.skipped:
         print(f"  {', '.join(result.skipped)}")

@@ -169,6 +169,9 @@ def test_actionable_issue_at_wip_ceiling_is_blocked():
     assert "WIP" in issue_result.disposition.reason
     assert result.admission_denied == 1
     assert result.admitted == 0
+    # alpha-engine-config#6500: admission denial is a WIP-queue constraint,
+    # not a §3.4 dependency chain — no blocking_chain to report.
+    assert issue_result.disposition.blocking_chain == []
 
 
 def test_blocked_issue_is_not_admitted():
@@ -244,6 +247,71 @@ def test_ordered_actions_only_includes_act():
     ordered = Reconciler.ordered_actions(result)
     assert len(ordered) == 1
     assert ordered[0].disposition.action == "create_pr"
+
+
+# ---------------------------------------------------------------------------
+# 6b. §3.4 — the reconciler returns the FULL transitive chain, not just the
+#     direct dependency (alpha-engine-config#6500)
+# ---------------------------------------------------------------------------
+
+def test_reconciler_names_full_transitive_chain_not_just_direct_dependency():
+    """i1 -> i2 -> s3 root: the reconciler's own result names the whole chain.
+
+    The named example from groom-sweep-policy's own clause registry
+    (GS-3.4-dependencies-compose-transitively): a PR blocked on a data
+    condition that is itself blocked on a weekly SF run must show the whole
+    chain, not just "blocked on data condition" with the real root invisible.
+    This is the same shape at the item-graph level: i1's direct dependency is
+    i2 (an intermediate carried item), and the real root is i2's own
+    dependency on an S3 key nobody has written yet.
+    """
+    root_dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://bucket/weekly-sf-output")
+    i2 = _issue(id="i2", declared_dependencies=[root_dep])
+    direct_dep = Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i2")
+    i1 = _issue(id="i1", declared_dependencies=[direct_dep])
+
+    result = _reconcile([i1, i2], ceiling=5)
+
+    r1 = next(r for r in result.items if r.item_id == "i1")
+    assert r1.disposition.kind is DispositionKind.BLOCKED
+    # Not just the direct dependency (i2) — the full chain to the root.
+    assert r1.disposition.blocking_chain == [
+        "issue_terminal:i2",
+        "s3_object:s3://bucket/weekly-sf-output",
+    ]
+    # The root cause is named in the human-readable reason too, not only in
+    # the direct-dependency's target.
+    assert "s3://bucket/weekly-sf-output" in r1.disposition.reason
+    assert result.blocked == 2  # both i1 (transitively) and i2 (directly)
+
+
+def test_skipped_blocked_item_still_carries_the_full_chain():
+    """§5.5 skip round-trip: a re-derived skip must not degrade the chain.
+
+    A skipped item's disposition is *rebuilt from the store*, not
+    recomputed (§5.5). If the store did not persist blocking_chain, every
+    cycle that skips a still-blocked item would silently lose the
+    structured chain even though nothing about the block changed —
+    exactly the drift the store's docstring already warns about for
+    disposition_kind/reason/action (alpha-engine-config#6500).
+    """
+    root_dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://bucket/weekly-sf-output")
+    i2 = _issue(id="i2", declared_dependencies=[root_dep])
+    direct_dep = Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i2")
+    i1 = _issue(id="i1", declared_dependencies=[direct_dep])
+    items = [i1, i2]
+    store = GenerationStore()
+
+    _reconcile(items, store=store, generation=1)
+    result = _reconcile(items, store=store, generation=2)
+
+    r1 = next(r for r in result.items if r.item_id == "i1")
+    assert r1.skipped is True
+    assert r1.disposition.kind is DispositionKind.BLOCKED
+    assert r1.disposition.blocking_chain == [
+        "issue_terminal:i2",
+        "s3_object:s3://bucket/weekly-sf-output",
+    ]
 
 
 # ---------------------------------------------------------------------------

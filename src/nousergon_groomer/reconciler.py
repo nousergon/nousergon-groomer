@@ -188,6 +188,10 @@ def _recorded_disposition(recorded) -> Optional[Disposition]:
             kind=DispositionKind(recorded.disposition_kind),
             reason=recorded.disposition_reason,
             action=recorded.disposition_action,
+            # alpha-engine-config#6500: carried forward exactly like the three
+            # fields above, so a skipped BLOCKED item's rebuilt disposition
+            # keeps the full §3.4 chain rather than degrading to prose-only.
+            blocking_chain=list(recorded.disposition_blocking_chain),
         )
     except (ValueError, TypeError):
         return None

@@ -81,6 +81,36 @@ While the major version is `0`, the public API may change between minor versions
   a separate pass over the substrate this package deliberately has no
   dependency on.
 
+- **Structured §3.4 blocking chains** (alpha-engine-config#6500).
+  `Disposition.blocking_chain` carries the full transitive dependency chain
+  — `"<kind>:<target>"` tokens in traversal order from the item's own
+  declared dependency to the root external condition — as data, rather than
+  requiring a consumer to parse it back out of `reason`'s `" -> "`-joined
+  prose. `compute_disposition` (`disposition._blocked`) populates it from
+  the same `DependencyGraph.get_blocked_chain` walk that already built
+  `reason`, so the two can never drift apart; a post-merge verification
+  BLOCKED (§3.8) carries its own predicate as a single-token chain. Empty
+  for an admission-denied BLOCKED (§4: a WIP-queue constraint, not a §3.4
+  chain) and enforced empty for every non-BLOCKED kind.
+
+  The transitive resolution itself — `DependencyGraph.get_blocked_chain`
+  walking an item-pointing dependency to its target's own dependency and so
+  on to the root unsatisfied leaf, cycle detection included — has existed
+  since `nousergon-groomer-PR14` and is unchanged here; what was missing was
+  a structured surface for it and a place that writes it back to GitHub.
+
+- **`GitHubExecutor` surfaces BLOCKED root causes** (alpha-engine-config#6500).
+  A BLOCKED disposition previously produced no GitHub-visible artifact at
+  all — `execute()` added the item id to `skipped` and stopped, so a human
+  reading a blocked issue or PR on GitHub saw only its label or linked item,
+  never the resolved root cause several hops away. `GitHubExecutor` now
+  posts (or, on a later pass, edits in place) a sticky comment — marked with
+  `BLOCKED_CHAIN_MARKER` for idempotent re-run (§5.3: no duplicate comment
+  each cycle) — naming the full chain from `render_blocked_comment`.
+  `ExecutorResult.blocked_surfaced` tracks which items were written this
+  pass, separately from `skipped` (no code action ACTed on them, but a
+  write did happen). Dry-run prints the would-be surface instead of writing.
+
 ## [0.10.0] — 2026-08-04
 
 ### Added
