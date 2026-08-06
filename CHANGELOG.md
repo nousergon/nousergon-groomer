@@ -5,6 +5,22 @@ All notable changes to `nousergon-groomer` are recorded here. Versions follow
 
 While the major version is `0`, the public API may change between minor versions.
 
+## [0.11.1] — 2026-08-06
+
+### Fixed
+
+- **Per-item dependency-cycle degradation** (alpha-engine-config#6509). A
+  single `DependencyCycleError` from `DependencyGraph.closure_state` used to
+  propagate out of `Reconciler.reconcile`'s per-item loop and abort the whole
+  batch — losing every other item's disposition for one cyclic pair of
+  declared dependencies (live incident alpha-engine-config-I6434). A cycle now
+  degrades exactly the cyclic item(s) to `UNDECIDABLE`, with the cycle path as
+  the reason — the corrective evidence `DependencyCycleError` exists to supply
+  — and the rest of the batch reconciles normally. A degraded item is never
+  skipped (§5.5: its closure is uncomputable, so its recorded fingerprint
+  carries none and can never match), so a cycle broken by a later edit is
+  picked up the very next cycle. No new API.
+
 ## [0.11.0] — 2026-08-04
 
 ### Added

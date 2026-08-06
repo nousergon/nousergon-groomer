@@ -32,7 +32,7 @@ from pydantic import BaseModel
 
 from .admission import AdmissionController
 from .dependency_evaluator import ObservedWorld
-from .dependency_graph import DependencyGraph
+from .dependency_graph import DependencyCycleError, DependencyGraph
 from .disposition import compute_disposition
 from .models import Disposition, DispositionKind, Item, ItemStage
 from .observed_gen import GenerationStoreProtocol, record_evaluation, should_skip
@@ -217,44 +217,71 @@ class Reconciler:
         results: list[ItemDisposition] = []
 
         for item in items:
-            # The closure — not just the item's own declarations — is what the
-            # skip token is computed over (§3.4, §5.5). A blocked item's spec
-            # never changes; the world underneath it does, and a token blind to
-            # that would skip precisely the items that must be re-derived.
-            closure_state = graph.closure_state(item.id)
+            try:
+                # The closure — not just the item's own declarations — is what
+                # the skip token is computed over (§3.4, §5.5). A blocked
+                # item's spec never changes; the world underneath it does, and
+                # a token blind to that would skip precisely the items that
+                # must be re-derived.
+                closure_state = graph.closure_state(item.id)
 
-            # Where the item actually is (§3). Computed for every item,
-            # skipped ones included: the stage is what the store stamps entry
-            # timestamps against, and F7's lead time is the difference between
-            # two of those stamps. An item skipped for a hundred cycles must
-            # still have the cycle that *did* move it recorded — and a skipped
-            # item's stage is unchanged by definition, so this costs a graph
-            # lookup already performed above.
-            stage = effective_stage(item, graph, world)
+                # Where the item actually is (§3). Computed for every item,
+                # skipped ones included: the stage is what the store stamps
+                # entry timestamps against, and F7's lead time is the
+                # difference between two of those stamps. An item skipped for
+                # a hundred cycles must still have the cycle that *did* move
+                # it recorded — and a skipped item's stage is unchanged by
+                # definition, so this costs a graph lookup already performed
+                # above.
+                stage = effective_stage(item, graph, world)
 
-            skipped = should_skip(
-                item,
-                store,
-                closure_state=closure_state,
-                current_generation=self._config.generation,
-            )
+                skipped = should_skip(
+                    item,
+                    store,
+                    closure_state=closure_state,
+                    current_generation=self._config.generation,
+                )
 
-            if skipped:
-                # Reuse the recorded verdict rather than recomputing it. The
-                # skip is an optimization of the EVALUATION, never of the
-                # re-derivation obligation (§3.3): it is legal here only
-                # because the fingerprint proves every input is unchanged, so
-                # re-deriving is guaranteed to reach the same answer.
-                recorded = store.get(item.id)
-                disposition = _recorded_disposition(recorded)
-                if disposition is None:
-                    # A record with no disposition — written before the field
-                    # existed. Fall through and evaluate; a skip that cannot
-                    # say what was decided is not a skip, it is a hole.
-                    skipped = False
+                if skipped:
+                    # Reuse the recorded verdict rather than recomputing it.
+                    # The skip is an optimization of the EVALUATION, never of
+                    # the re-derivation obligation (§3.3): it is legal here
+                    # only because the fingerprint proves every input is
+                    # unchanged, so re-deriving is guaranteed to reach the
+                    # same answer.
+                    recorded = store.get(item.id)
+                    disposition = _recorded_disposition(recorded)
+                    if disposition is None:
+                        # A record with no disposition — written before the
+                        # field existed. Fall through and evaluate; a skip
+                        # that cannot say what was decided is not a skip, it
+                        # is a hole.
+                        skipped = False
+                        disposition = compute_disposition(item, graph, world)
+                else:
                     disposition = compute_disposition(item, graph, world)
-            else:
-                disposition = compute_disposition(item, graph, world)
+            except DependencyCycleError as exc:
+                # §3.1: a cyclic dependency closure is a write-boundary defect
+                # — this error's whole purpose is to name the cycle path so a
+                # corrective issue can be filed. It must degrade THIS item,
+                # never abort the batch: one bad pair of declarations losing
+                # every other item's disposition is exactly the fleet-wide
+                # outage this guard exists to prevent (alpha-engine-config#6509,
+                # live incident alpha-engine-config-I6434). The cycle makes
+                # the effective stage and the skip fingerprint uncomputable,
+                # so both fall back honestly — the recorded stage, and "never
+                # skip" (a None closure_hash can never match, so the item is
+                # re-examined every cycle until the cycle is broken).
+                closure_state = None
+                stage = item.stage
+                skipped = False
+                disposition = Disposition(
+                    kind=DispositionKind.UNDECIDABLE,
+                    reason=(
+                        f"dependency cycle detected (§3.1 defect): "
+                        f"{' -> '.join(exc.cycle_path)}"
+                    ),
+                )
 
             # §5.5: record the evaluation fingerprint for this cycle. Even
             # skipped items get recorded so the next cycle can skip them too.

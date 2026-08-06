@@ -348,3 +348,83 @@ def test_mixed_backlog_end_to_end():
     assert result.terminal == 2  # done + the intent record deferring to its change
     assert result.undecidable == 0
     assert result.throughput == 3
+
+
+# ---------------------------------------------------------------------------
+# 8. Dependency-cycle degradation (§3.1) — alpha-engine-config#6509
+# ---------------------------------------------------------------------------
+
+def test_cyclic_pair_degrades_to_undecidable_and_batch_survives():
+    """A 2-node declared-dependency cycle degrades BOTH nodes, not a crash.
+
+    `Reconciler.reconcile` used to let a single `DependencyCycleError`
+    propagate out of the per-item loop and abort the whole batch
+    (alpha-engine-config#6509, live incident alpha-engine-config-I6434). The
+    cycle is a §3.1 write-boundary defect on the cyclic items themselves; the
+    rest of the batch is still fully derivable and must reconcile normally.
+    """
+    i1 = _issue(
+        id="i1",
+        declared_dependencies=[Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i2")],
+    )
+    i2 = _issue(
+        id="i2",
+        declared_dependencies=[Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i1")],
+    )
+    healthy = _issue(id="i3")  # untouched by the cycle
+
+    result = _reconcile([i1, i2, healthy], ceiling=5)
+
+    assert result.enumerated == 3
+    by_id = {r.item_id: r for r in result.items}
+    for cyclic in ("i1", "i2"):
+        disposition = by_id[cyclic].disposition
+        assert disposition.kind is DispositionKind.UNDECIDABLE
+        # The reason names the cycle path — the corrective evidence the
+        # DependencyCycleError docstring promises the caller can file.
+        assert "dependency cycle detected (§3.1 defect)" in disposition.reason
+        assert "i1" in disposition.reason and "i2" in disposition.reason
+        assert by_id[cyclic].skipped is False
+    # The rest of the batch reconciles normally — no crash, no collateral.
+    assert by_id["i3"].disposition.kind is DispositionKind.ACT
+    assert result.undecidable == 2
+    assert result.acted == 1
+
+
+def test_cyclic_item_stays_flagged_across_passes():
+    """A cyclic item is re-examined every cycle until the cycle is broken.
+
+    Its fingerprint carries no closure (the closure is uncomputable), and a
+    closure-less fingerprint can never match (§5.5) — so the item is never
+    skipped, and a cycle broken by a later edit is picked up immediately
+    rather than resting on a stale UNDECIDABLE record.
+    """
+    i1 = _issue(
+        id="i1",
+        declared_dependencies=[Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i2")],
+    )
+    i2 = _issue(
+        id="i2",
+        declared_dependencies=[Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i1")],
+    )
+    store = GenerationStore()
+
+    result = _reconcile([i1, i2], store=store, generation=1)
+    assert all(
+        r.disposition.kind is DispositionKind.UNDECIDABLE for r in result.items
+    )
+
+    # Same state, next cycle: still flagged (never skipped), still no crash.
+    result = _reconcile([i1, i2], store=store, generation=2)
+    assert all(
+        r.disposition.kind is DispositionKind.UNDECIDABLE for r in result.items
+    )
+    assert all(r.skipped is False for r in result.items)
+
+    # The cycle is broken (i2's declaration removed): the next cycle re-derives
+    # and the item leaves UNDECIDABLE — no stale record stands in its way.
+    healed = _issue(id="i2")  # no longer points back at i1
+    result = _reconcile([i1, healed], store=store, generation=3)
+    by_id = {r.item_id: r for r in result.items}
+    assert by_id["i1"].disposition.kind is not DispositionKind.UNDECIDABLE
+    assert by_id["i2"].disposition.kind is not DispositionKind.UNDECIDABLE
