@@ -50,6 +50,37 @@ While the major version is `0`, the public API may change between minor versions
   (`alpha-engine-config-I6311`) — this package makes no network calls and
   owns no GitHub client.
 
+- **§5.6 identity invariant, asserted by the reconciler** (alpha-engine-config#6316):
+  exactly one in-flight change per item, and a terminal item's disposition
+  never regresses to non-terminal.
+
+  `Item.additional_change_refs` (and the `has_identity_conflict` predicate)
+  carries every open change beyond the first that the adapter observed
+  naming the same intent — `GitHubSnapshot`'s `_change_refs_by_issue` used to
+  truncate to "first PR wins" and silently drop the evidence that a second
+  open PR also closed the same issue. `compute_disposition` now maps a
+  non-empty `additional_change_refs` to `UNDECIDABLE` (before dependency
+  evaluation, after the terminal-stage check — a terminal item's disposition
+  still never regresses because of it), so a duplicated change can never
+  reach ACT or an auto-merge lane through this record.
+
+  `Reconciler.reconcile` separately guards the §5.5 skip path: the skip
+  fingerprint has no component sensitive to `Item.stage` itself, so a stale
+  store record written while an item was non-terminal could otherwise be
+  replayed verbatim after the item went terminal. A terminal item whose
+  skip-sourced disposition isn't `TERMINAL` now falls through to a fresh
+  `compute_disposition` call rather than being trusted.
+
+  `ReconcilerResult.identity_conflicts` and `ItemDisposition.identity_conflict`
+  make the invariant observable (§7): any value above zero is the paging
+  condition.
+
+  This is the reconciler-side half of the fix `alpha-engine-config-I6316`
+  asks for — identity asserted as an invariant every cycle rather than
+  repaired after the fact by `alpha-engine-config/scripts/duplicate_pr_sweep.py`,
+  a separate pass over the substrate this package deliberately has no
+  dependency on.
+
 - **Structured §3.4 blocking chains** (alpha-engine-config#6500).
   `Disposition.blocking_chain` carries the full transitive dependency chain
   — `"<kind>:<target>"` tokens in traversal order from the item's own
