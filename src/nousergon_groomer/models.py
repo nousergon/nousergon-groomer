@@ -857,6 +857,29 @@ class Item(BaseModel):
     #: feeds whichever consumer implements §3.4's epic-progress semantics.
     sub_issue_ids: list[str] = []
 
+    #: Refs of additional open changes observed to *also* render this item's
+    #: ``in_flight`` stage, beyond the one already carried in
+    #: :attr:`change_ref` (groom-sweep-policy §5.6, alpha-engine-config#6316).
+    #:
+    #: §3 says the relation between an intent and the change realising it is
+    #: **internal to the item** and therefore cannot be inconsistent — but
+    #: that is only true once the item genuinely carries the whole relation.
+    #: The substrate can still hand the adapter more than one open change
+    #: naming the same intent (two pull requests both closing the same
+    #: issue); dropping every match but the first (the pre-#6316 behaviour of
+    #: ``github_snapshot._change_refs_by_issue``) makes the *representation*
+    #: consistent by construction while the *world* stays inconsistent
+    #: underneath it — the exact defect ``duplicate_pr_sweep.py`` existed to
+    #: catch from the outside, after the fact, on a separate pass (§5.6's
+    #: forbidden shape).
+    #:
+    #: A non-empty list is a write-boundary-visible identity conflict:
+    #: :func:`disposition.compute_disposition` maps it to ``UNDECIDABLE``
+    #: before any stage-specific logic runs, so a duplicated change can never
+    #: reach ACT or an auto-merge lane through this record. Empty in the
+    #: overwhelmingly common case of exactly one change.
+    additional_change_refs: list[str] = []
+
     # -- write-boundary invariants (§3.1) ----------------------------------
 
     @model_validator(mode="after")
@@ -900,6 +923,16 @@ class Item(BaseModel):
     def carries_change(self) -> bool:
         """True iff this record carries the change itself, not just a ref."""
         return self.change is not None
+
+    @property
+    def has_identity_conflict(self) -> bool:
+        """True iff more than one open change was observed for this item (§5.6).
+
+        See :attr:`additional_change_refs`. Named as its own predicate rather
+        than requiring every caller to test the list directly, matching
+        :attr:`has_declared_dependency`.
+        """
+        return bool(self.additional_change_refs)
 
     @property
     def has_declared_dependency(self) -> bool:

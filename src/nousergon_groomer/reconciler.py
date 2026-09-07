@@ -32,7 +32,7 @@ from pydantic import BaseModel
 
 from .admission import AdmissionController
 from .dependency_evaluator import ObservedWorld
-from .dependency_graph import DependencyGraph
+from .dependency_graph import DependencyCycleError, DependencyGraph
 from .disposition import compute_disposition
 from .models import Disposition, DispositionKind, Item, ItemStage
 from .observed_gen import GenerationStoreProtocol, record_evaluation, should_skip
@@ -93,6 +93,14 @@ class ItemDisposition(BaseModel):
     skipped: bool = False  # §5.5: was this item skipped (inputs unchanged)?
     admission_reason: Optional[str] = None  # set when admission downgraded ACT
 
+    #: True iff this item declared more than one open in-flight change this
+    #: cycle (§5.6, alpha-engine-config#6316) — set whenever
+    #: ``Item.has_identity_conflict`` is true, regardless of what the item's
+    #: disposition resolved to (a terminal item keeps its TERMINAL
+    #: disposition per §5.6's own precedence, but the conflict is still
+    #: worth counting so it pages rather than resolving silently).
+    identity_conflict: bool = False
+
 
 class ReconcilerResult(BaseModel):
     """The output of one reconciler pass.
@@ -113,6 +121,13 @@ class ReconcilerResult(BaseModel):
     skipped: int
     admitted: int  # ACT-create-PR dispositions that passed admission
     admission_denied: int  # ACT-create-PR dispositions downgraded by admission
+
+    #: Count of items carrying more than one open in-flight change this cycle
+    #: (§5.6, alpha-engine-config#6316's §7 row). §7 forbids a blind counter
+    #: with no aggregate: any value above zero is the paging condition — the
+    #: identity invariant this reconciler asserts is not holding somewhere
+    #: upstream of it.
+    identity_conflicts: int = 0
 
     #: :class:`ItemStage` value → number of items at that effective stage this
     #: cycle. F6 is the share of the open population resting on a declared
@@ -217,44 +232,97 @@ class Reconciler:
         results: list[ItemDisposition] = []
 
         for item in items:
-            # The closure — not just the item's own declarations — is what the
-            # skip token is computed over (§3.4, §5.5). A blocked item's spec
-            # never changes; the world underneath it does, and a token blind to
-            # that would skip precisely the items that must be re-derived.
-            closure_state = graph.closure_state(item.id)
+            try:
+                # The closure — not just the item's own declarations — is what
+                # the skip token is computed over (§3.4, §5.5). A blocked
+                # item's spec never changes; the world underneath it does, and
+                # a token blind to that would skip precisely the items that
+                # must be re-derived.
+                closure_state = graph.closure_state(item.id)
 
-            # Where the item actually is (§3). Computed for every item,
-            # skipped ones included: the stage is what the store stamps entry
-            # timestamps against, and F7's lead time is the difference between
-            # two of those stamps. An item skipped for a hundred cycles must
-            # still have the cycle that *did* move it recorded — and a skipped
-            # item's stage is unchanged by definition, so this costs a graph
-            # lookup already performed above.
-            stage = effective_stage(item, graph, world)
+                # Where the item actually is (§3). Computed for every item,
+                # skipped ones included: the stage is what the store stamps
+                # entry timestamps against, and F7's lead time is the
+                # difference between two of those stamps. An item skipped for
+                # a hundred cycles must still have the cycle that *did* move
+                # it recorded — and a skipped item's stage is unchanged by
+                # definition, so this costs a graph lookup already performed
+                # above.
+                stage = effective_stage(item, graph, world)
 
-            skipped = should_skip(
-                item,
-                store,
-                closure_state=closure_state,
-                current_generation=self._config.generation,
-            )
+                skipped = should_skip(
+                    item,
+                    store,
+                    closure_state=closure_state,
+                    current_generation=self._config.generation,
+                )
 
-            if skipped:
-                # Reuse the recorded verdict rather than recomputing it. The
-                # skip is an optimization of the EVALUATION, never of the
-                # re-derivation obligation (§3.3): it is legal here only
-                # because the fingerprint proves every input is unchanged, so
-                # re-deriving is guaranteed to reach the same answer.
-                recorded = store.get(item.id)
-                disposition = _recorded_disposition(recorded)
-                if disposition is None:
-                    # A record with no disposition — written before the field
-                    # existed. Fall through and evaluate; a skip that cannot
-                    # say what was decided is not a skip, it is a hole.
-                    skipped = False
+                if skipped:
+                    # Reuse the recorded verdict rather than recomputing it.
+                    # The skip is an optimization of the EVALUATION, never of
+                    # the re-derivation obligation (§3.3): it is legal here
+                    # only because the fingerprint proves every input is
+                    # unchanged, so re-deriving is guaranteed to reach the
+                    # same answer.
+                    recorded = store.get(item.id)
+                    disposition = _recorded_disposition(recorded)
+                    if disposition is None:
+                        # A record with no disposition — written before the
+                        # field existed. Fall through and evaluate; a skip
+                        # that cannot say what was decided is not a skip, it
+                        # is a hole.
+                        skipped = False
+                        disposition = compute_disposition(item, graph, world)
+                else:
                     disposition = compute_disposition(item, graph, world)
-            else:
+            except DependencyCycleError as exc:
+                # §3.1: a cyclic dependency closure is a write-boundary defect
+                # — this error's whole purpose is to name the cycle path so a
+                # corrective issue can be filed. It must degrade THIS item,
+                # never abort the batch: one bad pair of declarations losing
+                # every other item's disposition is exactly the fleet-wide
+                # outage this guard exists to prevent (alpha-engine-config#6509,
+                # live incident alpha-engine-config-I6434). The cycle makes
+                # the effective stage and the skip fingerprint uncomputable,
+                # so both fall back honestly — the recorded stage, and "never
+                # skip" (a None closure_hash can never match, so the item is
+                # re-examined every cycle until the cycle is broken).
+                closure_state = None
+                stage = item.stage
+                skipped = False
+                disposition = Disposition(
+                    kind=DispositionKind.UNDECIDABLE,
+                    reason=(
+                        f"dependency cycle detected (§3.1 defect): "
+                        f"{' -> '.join(exc.cycle_path)}"
+                    ),
+                )
+
+            # §5.6 invariant — a terminal item's disposition never regresses
+            # (alpha-engine-config#6316). `compute_disposition` itself always
+            # returns TERMINAL for a terminal-stage item (its own step 3), so
+            # this can only fire via the SKIP path above: a record written
+            # while the item was still non-terminal, replayed after the item
+            # went terminal, because the §5.5 fingerprint has no component
+            # sensitive to `Item.stage` itself. Rather than trust a skip that
+            # cannot hold, fall through and re-derive fresh — the same
+            # "a skip that cannot say what was decided is a hole, not an
+            # optimization" rule already applied a few lines up for a
+            # disposition-less record. A fresh recompute that *still* isn't
+            # TERMINAL for a terminal-stage item is a `compute_disposition`
+            # regression, not a skip-staleness case, and is asserted loudly
+            # rather than papered over.
+            if item.stage.is_terminal and disposition.kind is not DispositionKind.TERMINAL:
+                skipped = False
                 disposition = compute_disposition(item, graph, world)
+                if disposition.kind is not DispositionKind.TERMINAL:
+                    raise RuntimeError(
+                        f"§5.6 invariant violated: item {item.id!r} is at terminal "
+                        f"stage {item.stage.value!r} but compute_disposition "
+                        f"returned {disposition.kind.value!r}, not TERMINAL — this "
+                        "should be unreachable (compute_disposition's own step 3 "
+                        "guarantees TERMINAL for every terminal-stage item)"
+                    )
 
             # §5.5: record the evaluation fingerprint for this cycle. Even
             # skipped items get recorded so the next cycle can skip them too.
@@ -294,6 +362,7 @@ class Reconciler:
                     stage=stage,
                     skipped=skipped,
                     admission_reason=admission_reason,
+                    identity_conflict=item.has_identity_conflict,
                 )
             )
 
@@ -314,7 +383,7 @@ class Reconciler:
     ) -> ReconcilerResult:
         """Tally aggregate counts and assemble the result (§7)."""
         acted = blocked = terminal = undecidable = skipped = 0
-        admitted = admission_denied = 0
+        admitted = admission_denied = identity_conflicts = 0
         # Seeded with every stage at zero: a stage absent from the map and a
         # stage with no items are different claims, and only the second is
         # true. §6.2 — nothing emitted is unobserved, never healthy.
@@ -337,6 +406,8 @@ class Reconciler:
                 terminal += 1
             elif kind is DispositionKind.UNDECIDABLE:
                 undecidable += 1
+            if r.identity_conflict:
+                identity_conflicts += 1
 
         return ReconcilerResult(
             items=results,
@@ -349,6 +420,7 @@ class Reconciler:
             skipped=skipped,
             admitted=admitted,
             admission_denied=admission_denied,
+            identity_conflicts=identity_conflicts,
             stage_counts=stage_counts,
         )
 

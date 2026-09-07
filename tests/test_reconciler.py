@@ -19,11 +19,12 @@ from nousergon_groomer.models import (
     ChangeCondition,
     Dependency,
     DependencyKind,
+    Disposition,
     DispositionKind,
     Item,
     ItemStage,
 )
-from nousergon_groomer.observed_gen import GenerationStore
+from nousergon_groomer.observed_gen import GenerationStore, record_evaluation
 from nousergon_groomer.reconciler import (
     Reconciler,
     ReconcilerConfig,
@@ -348,3 +349,179 @@ def test_mixed_backlog_end_to_end():
     assert result.terminal == 2  # done + the intent record deferring to its change
     assert result.undecidable == 0
     assert result.throughput == 3
+
+
+# ---------------------------------------------------------------------------
+# 8. §5.6 identity invariant (alpha-engine-config#6316) — exactly one
+#    in-flight change per item, asserted by the reconciler as an invariant,
+#    not repaired after the fact by a separate pass (`duplicate_pr_sweep.py`).
+# ---------------------------------------------------------------------------
+
+def test_duplicate_in_flight_change_is_rejected_not_actioned():
+    """Construction: an item whose harness observed TWO open changes for the
+    same intent. The reconciler must never let this reach ACT or an
+    auto-merge lane — it must be flagged (UNDECIDABLE) and counted, by
+    construction, for every such item, not merely for a sampled example.
+    """
+    duplicated = Item(
+        id="i1",
+        stage=ItemStage.IN_FLIGHT,
+        change_ref="100",
+        additional_change_refs=["101"],
+    )
+    result = _reconcile([duplicated], ceiling=5)
+    r = result.items[0]
+    assert r.disposition.kind is DispositionKind.UNDECIDABLE
+    assert r.disposition.kind is not DispositionKind.ACT
+    assert r.identity_conflict is True
+    assert result.identity_conflicts == 1
+    assert result.acted == 0
+
+
+def test_duplicate_in_flight_change_holds_across_a_family_of_constructions():
+    """Not a single sampled check: every member of a small family of
+    duplicate-declaring items resolves the same way — UNDECIDABLE, flagged,
+    never ACT — regardless of how many extra refs or what stage-adjacent
+    shape the item takes.
+    """
+    duplicates = [
+        Item(id="i1", stage=ItemStage.IN_FLIGHT, change_ref="100",
+             additional_change_refs=["101"]),
+        Item(id="i2", stage=ItemStage.IN_FLIGHT, change_ref="200",
+             additional_change_refs=["201", "202"]),
+        _pr(ChangeCondition.CLEAN, id="p3", mergeable=True, ci_green=True,
+            labels=["groom-reviewed"], additional_change_refs=["p4"]),
+        _pr(ChangeCondition.CI_RED, id="p5", ci_green=False,
+            additional_change_refs=["p6"]),
+    ]
+    result = _reconcile(duplicates, ceiling=5)
+    assert result.identity_conflicts == len(duplicates)
+    for r in result.items:
+        assert r.identity_conflict is True
+        assert r.disposition.kind is DispositionKind.UNDECIDABLE
+    assert result.acted == 0
+
+
+def test_non_duplicated_items_are_unaffected_by_the_invariant_check():
+    """The invariant only fires for items that actually declare a conflict —
+    an ordinary population is untouched.
+    """
+    items = [
+        _issue(id="i1"),
+        _pr(ChangeCondition.CLEAN, id="p1", mergeable=True, ci_green=True,
+            labels=["groom-reviewed"]),
+    ]
+    result = _reconcile(items, ceiling=5)
+    assert result.identity_conflicts == 0
+    for r in result.items:
+        assert r.identity_conflict is False
+
+
+def test_terminal_item_disposition_never_regresses_via_a_stale_skip():
+    """§5.6's second invariant: a change whose item is terminal is itself
+    terminal. `compute_disposition` guarantees this on a fresh evaluation;
+    the only way to violate it is a STALE store record replayed through the
+    §5.5 skip path (the fingerprint has no component sensitive to
+    `Item.stage` itself). Construct exactly that stale record and assert the
+    reconciler self-heals to TERMINAL rather than replaying the stale ACT.
+    """
+    item_in_flight = _pr(ChangeCondition.CI_RED, id="p1", ci_green=False)
+    store = GenerationStore()
+    world = _world_full()
+    # Cycle 1: item is genuinely in flight and red — records a real ACT.
+    record_evaluation(
+        item_in_flight,
+        store,
+        generation=1,
+        closure_state=[],
+        disposition=Disposition(kind=DispositionKind.ACT, action="fix_ci"),
+        stage=ItemStage.IN_FLIGHT,
+    )
+    # Cycle 2: the SAME item id, now recorded as DONE by the harness, with a
+    # label/deps/closure fingerprint identical to cycle 1 (so the skip
+    # logic — blind to `stage` — would consider it unchanged and replay the
+    # stale ACT verbatim if nothing corrected it).
+    item_done = Item(id="p1", stage=ItemStage.DONE)
+    result = _reconcile([item_done], world=world, store=store, generation=2)
+    r = result.items[0]
+    assert r.disposition.kind is DispositionKind.TERMINAL
+    assert r.disposition.kind is not DispositionKind.ACT
+    assert result.terminal == 1
+    assert result.acted == 0
+# 8. Dependency-cycle degradation (§3.1) — alpha-engine-config#6509
+# ---------------------------------------------------------------------------
+
+def test_cyclic_pair_degrades_to_undecidable_and_batch_survives():
+    """A 2-node declared-dependency cycle degrades BOTH nodes, not a crash.
+
+    `Reconciler.reconcile` used to let a single `DependencyCycleError`
+    propagate out of the per-item loop and abort the whole batch
+    (alpha-engine-config#6509, live incident alpha-engine-config-I6434). The
+    cycle is a §3.1 write-boundary defect on the cyclic items themselves; the
+    rest of the batch is still fully derivable and must reconcile normally.
+    """
+    i1 = _issue(
+        id="i1",
+        declared_dependencies=[Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i2")],
+    )
+    i2 = _issue(
+        id="i2",
+        declared_dependencies=[Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i1")],
+    )
+    healthy = _issue(id="i3")  # untouched by the cycle
+
+    result = _reconcile([i1, i2, healthy], ceiling=5)
+
+    assert result.enumerated == 3
+    by_id = {r.item_id: r for r in result.items}
+    for cyclic in ("i1", "i2"):
+        disposition = by_id[cyclic].disposition
+        assert disposition.kind is DispositionKind.UNDECIDABLE
+        # The reason names the cycle path — the corrective evidence the
+        # DependencyCycleError docstring promises the caller can file.
+        assert "dependency cycle detected (§3.1 defect)" in disposition.reason
+        assert "i1" in disposition.reason and "i2" in disposition.reason
+        assert by_id[cyclic].skipped is False
+    # The rest of the batch reconciles normally — no crash, no collateral.
+    assert by_id["i3"].disposition.kind is DispositionKind.ACT
+    assert result.undecidable == 2
+    assert result.acted == 1
+
+
+def test_cyclic_item_stays_flagged_across_passes():
+    """A cyclic item is re-examined every cycle until the cycle is broken.
+
+    Its fingerprint carries no closure (the closure is uncomputable), and a
+    closure-less fingerprint can never match (§5.5) — so the item is never
+    skipped, and a cycle broken by a later edit is picked up immediately
+    rather than resting on a stale UNDECIDABLE record.
+    """
+    i1 = _issue(
+        id="i1",
+        declared_dependencies=[Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i2")],
+    )
+    i2 = _issue(
+        id="i2",
+        declared_dependencies=[Dependency(kind=DependencyKind.ISSUE_TERMINAL, target="i1")],
+    )
+    store = GenerationStore()
+
+    result = _reconcile([i1, i2], store=store, generation=1)
+    assert all(
+        r.disposition.kind is DispositionKind.UNDECIDABLE for r in result.items
+    )
+
+    # Same state, next cycle: still flagged (never skipped), still no crash.
+    result = _reconcile([i1, i2], store=store, generation=2)
+    assert all(
+        r.disposition.kind is DispositionKind.UNDECIDABLE for r in result.items
+    )
+    assert all(r.skipped is False for r in result.items)
+
+    # The cycle is broken (i2's declaration removed): the next cycle re-derives
+    # and the item leaves UNDECIDABLE — no stale record stands in its way.
+    healed = _issue(id="i2")  # no longer points back at i1
+    result = _reconcile([i1, healed], store=store, generation=3)
+    by_id = {r.item_id: r for r in result.items}
+    assert by_id["i1"].disposition.kind is not DispositionKind.UNDECIDABLE
+    assert by_id["i2"].disposition.kind is not DispositionKind.UNDECIDABLE

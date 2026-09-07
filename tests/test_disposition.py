@@ -197,6 +197,80 @@ def test_proposed_item_with_an_unsatisfied_dependency_is_blocked():
     assert "blocked on" in d.reason
 
 
+# ---------------------------------------------------------------------------
+# 4. Identity conflict (§5.6, alpha-engine-config#6316) — a second in-flight
+#    change for an item that already has one is UNDECIDABLE, never ACT, and
+#    a terminal item's disposition never regresses because of it.
+# ---------------------------------------------------------------------------
+
+def test_identity_conflict_is_undecidable_not_terminal_deferral():
+    """An issue-record deferring to its change, but with a SECOND open change
+    also naming it, must not resolve to the ordinary "defer to the record
+    holding the change" TERMINAL — that would silently let the duplicate
+    proceed unflagged. It must be UNDECIDABLE, naming both refs.
+    """
+    item = Item(
+        id="i1",
+        stage=ItemStage.IN_FLIGHT,
+        change_ref="100",
+        additional_change_refs=["101"],
+    )
+    world = _world_full()
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.UNDECIDABLE
+    assert "100" in d.reason
+    assert "101" in d.reason
+    assert "§5.6" in d.reason
+
+
+def test_identity_conflict_never_reaches_act():
+    """A PR-carrying item flagged with a duplicate never reaches automerge."""
+    item = _pr(
+        ChangeCondition.CLEAN, id="p1", mergeable=True, ci_green=True,
+        labels=["groom-reviewed"], additional_change_refs=["p2"],
+    )
+    world = _world_full()
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.UNDECIDABLE
+    assert d.kind is not DispositionKind.ACT
+
+
+def test_terminal_stage_takes_precedence_over_identity_conflict():
+    """§5.6: a terminal item's disposition never regresses because of a
+    stray duplicate-change observation — TERMINAL wins over UNDECIDABLE.
+    """
+    item = Item(
+        id="i1",
+        stage=ItemStage.DONE,
+        change_ref="100",
+        additional_change_refs=["101"],
+    )
+    world = _world_full()
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.TERMINAL
+    assert item.has_identity_conflict is True  # the conflict is real, just outranked
+
+
+def test_identity_conflict_takes_precedence_over_undecidable_dependency():
+    """Identity is checked before ordinary dependency evaluation (§5.1 order)."""
+    dep = Dependency(kind=DependencyKind.S3_OBJECT, target="s3://b/k")
+    item = Item(
+        id="i1",
+        stage=ItemStage.IN_FLIGHT,
+        change_ref="100",
+        additional_change_refs=["101"],
+        declared_dependencies=[dep],
+    )
+    world = ObservedWorld()  # s3_objects is None → dep would be undecidable
+    graph = _graph([item], world)
+    d = compute_disposition(item, graph, world)
+    assert d.kind is DispositionKind.UNDECIDABLE
+    assert "§5.6" in d.reason
+
+
 def test_a_recorded_ready_stage_is_re_derived_not_trusted():
     """A harness may record `ready`; the loop re-derives it every cycle (§3).
 

@@ -91,27 +91,39 @@ def _parse_ci_from_rollup(data: dict[str, Any]) -> Optional[bool]:
     return None
 
 
-def _change_refs_by_issue(prs: list[dict[str, Any]]) -> dict[int, str]:
-    """Map issue number → the ref of the open change rendering it (§3).
+def _change_refs_by_issue(prs: list[dict[str, Any]]) -> dict[int, list[str]]:
+    """Map issue number → refs of every open change naming it (§3, §5.6).
 
     An issue named by an open pull request is not a separate population
     "waiting on review" — it is the **same item**, at the ``in_flight`` stage,
-    and the pull request is what renders that stage. So this returns the ref
-    rather than a bare set: the issue-side record carries ``change_ref`` so the
-    two records are visibly one unit, and the disposition function defers to
-    whichever record actually holds the change instead of producing two
-    verdicts about one piece of work.
+    and the pull request is what renders that stage. So this returns the refs
+    rather than a bare boolean: the issue-side record carries the first ref as
+    ``change_ref`` so the two records are visibly one unit, and the
+    disposition function defers to whichever record actually holds the change
+    instead of producing two verdicts about one piece of work.
 
-    First reference wins when several pull requests name the same issue. That
-    is a stable, order-preserving choice rather than a correct one: linking one
-    issue to several open changes is a representation defect the write boundary
-    should reject (§3.1), tracked separately as the §5.6 identity work.
+    **Every** matching ref is returned, in encounter order, not just the
+    first (alpha-engine-config#6316 — pre-#6316 this truncated to one ref,
+    silently dropping evidence that more than one open change named the same
+    issue). The write boundary should reject a second open change naming the
+    same intent, but until every harness enforces that at authorship, this
+    function still hands the *whole* observed set forward so the item model
+    can carry it — see ``fetch()``, which assigns ``refs[0]`` to
+    ``Item.change_ref`` and everything past it to
+    ``Item.additional_change_refs``, and :mod:`disposition`, which asserts
+    the identity invariant over that field. This is not a second
+    cross-referencing pass: it is the same regex walk this function already
+    did, no longer truncated.
     """
-    refs: dict[int, str] = {}
+    refs: dict[int, list[str]] = {}
     for pr in prs:
         text = f"{pr.get('title', '')}\n{pr.get('body') or ''}"
         for match in _ISSUE_REF.findall(text):
-            refs.setdefault(int(match), str(pr["number"]))
+            issue_number = int(match)
+            pr_ref = str(pr["number"])
+            bucket = refs.setdefault(issue_number, [])
+            if pr_ref not in bucket:
+                bucket.append(pr_ref)
     return refs
 
 
@@ -248,6 +260,7 @@ def _raw_to_item(
     declared_dependencies: Optional[list[Dependency]] = None,
     custom_fields: Optional[dict[str, Any]] = None,
     sub_issue_ids: Optional[list[str]] = None,
+    additional_change_refs: Optional[list[str]] = None,
 ) -> Item:
     return Item(
         id=str(raw["number"]),
@@ -259,6 +272,7 @@ def _raw_to_item(
         declared_dependencies=declared_dependencies or [],
         custom_fields=custom_fields or {},
         sub_issue_ids=sub_issue_ids or [],
+        additional_change_refs=additional_change_refs or [],
     )
 
 
@@ -396,8 +410,13 @@ class GitHubSnapshot:
             # An open issue is `proposed`; readiness is derived by the
             # reconciler, never recorded here (§3). An issue an open change
             # already names is `in_flight` — the same item, one stage later,
-            # carrying the ref of the record that holds the change.
-            change_ref = change_refs_by_issue.get(issue["number"])
+            # carrying the ref of the record that holds the change. When more
+            # than one open change names the same issue, the first becomes
+            # `change_ref` and the rest ride along as `additional_change_refs`
+            # (§5.6, alpha-engine-config#6316) so the identity conflict is
+            # visible to the item model instead of silently dropped.
+            all_refs = change_refs_by_issue.get(issue["number"], [])
+            change_ref = all_refs[0] if all_refs else None
             items.append(
                 _raw_to_item(
                     issue,
@@ -406,6 +425,7 @@ class GitHubSnapshot:
                     declared_dependencies=_native_dependencies(issue, is_change=False),
                     custom_fields=_custom_fields_from_raw(issue),
                     sub_issue_ids=_native_sub_issue_ids(issue),
+                    additional_change_refs=all_refs[1:],
                 )
             )
 
