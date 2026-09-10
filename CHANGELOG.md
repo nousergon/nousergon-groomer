@@ -5,6 +5,35 @@ All notable changes to `nousergon-groomer` are recorded here. Versions follow
 
 While the major version is `0`, the public API may change between minor versions.
 
+## [Unreleased]
+
+### Fixed
+
+- **Repository-baseline gaps closed** (alpha-engine-config-I10433,
+  repository-baseline-policy.md). This repo had no coverage floor at all —
+  coverage could regress to 0% with nothing noticing — and no CODEOWNERS,
+  SECURITY.md, PR template, issue templates, or badges. Added:
+  - `[tool.coverage.report] fail_under = 94` in `pyproject.toml`, a ratchet
+    set against 94.31% measured on CI's Python 3.12 leg (§4.2 C2).
+  - `tests/test_coverage_scope.py`, asserting the measurement *scope* — the
+    `--cov` source is the whole `nousergon_groomer` package, exactly one
+    floor at or above the ratchet, no `omit` beyond the pinned (currently
+    empty) justified list, no source module outside the measured package
+    (§4.2 C5).
+  - `.github/CODEOWNERS` (`* @cipher813`), `SECURITY.md`,
+    `.github/pull_request_template.md` (carrying the `Prepared by:`
+    attribution field), and `.github/ISSUE_TEMPLATE/{bug_report,
+    feature_request}.md` (§3.2, §3.3).
+  - A CI-generated coverage badge: `scripts/publish_coverage_badge.sh`
+    writes a shields.io `endpoint` document to the orphan `badges` branch
+    on every push to `main` (py3.12 leg), from the same `.coverage` file
+    the `pyproject.toml` gate reads. The README's `Python` and `License`
+    badges likewise come from PyPI metadata and the repo's own LICENSE
+    rather than a typed literal (§5.1).
+  - This does not close `RB-4.1` (a required status check enforcing the
+    suite) — that is a branch-protection change owned by the fleet-wide
+    baseline session, not this repo's PR.
+
 ## [0.11.1] — 2026-08-06
 
 ### Fixed

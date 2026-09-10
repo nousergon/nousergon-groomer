@@ -1,5 +1,10 @@
 # nousergon-groomer
 
+[![CI](https://github.com/nousergon/nousergon-groomer/actions/workflows/test.yml/badge.svg)](https://github.com/nousergon/nousergon-groomer/actions/workflows/test.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nousergon/nousergon-groomer/badges/coverage.json)](https://github.com/nousergon/nousergon-groomer/actions/workflows/test.yml)
+[![Python](https://img.shields.io/pypi/pyversions/nousergon-groomer)](https://pypi.org/project/nousergon-groomer/)
+[![License](https://img.shields.io/github/license/nousergon/nousergon-groomer)](LICENSE)
+
 The **deterministic control plane** for the autonomous backlog-and-PR
 maintenance loop — the fixture-runnable core specified by the
 [groom-sweep policy](https://github.com/nousergon/nous-ergon-ops/blob/main/policies/groom-sweep-policy.md).
@@ -118,7 +123,10 @@ pytest
 
 That's it — the suite runs over the recorded fixture scenarios with no network, no
 credentials, and no model. If the last command exits 0, the core is
-correct against its recorded fixtures.
+correct against its recorded fixtures. Coverage is measured over the whole
+`nousergon_groomer` package and enforced: `pytest --cov` exits non-zero below
+the floor in [`pyproject.toml`](pyproject.toml), and the badge above renders
+the figure CI last measured on `main`.
 
 ## Using the core
 

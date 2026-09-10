@@ -12,6 +12,11 @@ jobs:
   test:
     name: pytest (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # The badge-publish step below writes `coverage.json` on the orphan
+    # `badges` branch through the contents API. Nothing else in this job
+    # writes, and the token is scoped no wider than that.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -27,3 +32,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,config,model,github]"
       - run: python -m pytest -q --cov --cov-report=term-missing
+
+      # repository-baseline-policy.md §5.1 — a badge whose value is written by
+      # a human is forbidden: it renders identically to a real one and becomes
+      # false the moment reality moves without anyone editing a file. This
+      # repo carried no coverage badge at all. The README badge now renders
+      # whatever this step last published, derived from the same `.coverage`
+      # file the pyproject.toml gate reads.
+      #
+      # One leg only, pushes to main only: a matrix run on every leg would
+      # race to publish, and a pull-request run measures a tree that is not
+      # yet what a reader of the README is looking at.
+      - name: Publish coverage badge
+        if: matrix.python-version == '3.12' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/publish_coverage_badge.sh
