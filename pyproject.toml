@@ -24,7 +24,7 @@ config = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff==0.16.8",
+    "ruff==0.16.9",
     "build>=1.0",
     # tests/test_coverage_scope.py parses this file; tomllib is 3.11+ and
     # requires-python floors at 3.9, where collection fails without this.
