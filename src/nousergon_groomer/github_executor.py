@@ -388,6 +388,20 @@ class GitHubExecutor:
         resolution_message = self._model_provider.complete(prompt, model=self._model)
         self._push_commit(item, repo, resolution_message)
 
+    def _ready_refusal(self, item: Item, repo: str) -> Optional[str]:
+        """Why ``_advance_draft`` must not mark this draft ready, or ``None``.
+
+        The model's READY is advice; whether a draft is HELD is the host's
+        fact, not the model's (a freeze, a ``Hold:`` comment, a human-owned
+        label, a dependency written in the body). Held drafts were readied
+        four times in nine days across the fleet because each readying path
+        checked a different subset of those forms (alpha-engine-config#13001).
+        This base class knows none of them, so it fails closed and never
+        issues the ready write: a host that wants ``advance_draft`` to ready
+        drafts overrides this with its readiness predicate (the alpha-engine
+        host routes the write through ``gate_pr_actions.mark_pr_ready``)."""
+        return "no-readiness-predicate: the host must override _ready_refusal"
+
     def _advance_draft(self, item: Item, repo: str) -> None:
         self._require_change(item, "advance_draft")
         prompt = (
@@ -399,6 +413,12 @@ class GitHubExecutor:
             raise RuntimeError("advance_draft requires a model provider")
         advice = self._model_provider.complete(prompt, model=self._model)
         if advice.strip().upper().startswith("READY"):
+            refused = self._ready_refusal(item, repo)
+            if refused:
+                raise RuntimeError(
+                    f"advance_draft: PR #{item.id} left draft, ready write refused "
+                    f"({refused})"
+                )
             response = self._client.patch(
                 f"/repos/{repo}/pulls/{item.id}",
                 json={"draft": False},
