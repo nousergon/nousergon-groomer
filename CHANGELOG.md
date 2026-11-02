@@ -9,6 +9,15 @@ While the major version is `0`, the public API may change between minor versions
 
 ### Fixed
 
+- **`advance_draft` never readies a draft on model advice alone**
+  (alpha-engine-config-I13001). `GitHubExecutor._advance_draft` now asks
+  `_ready_refusal(item, repo)` before the ready write; the base class knows
+  no hold forms, so it refuses by default and reports the refusal as an
+  error. A host overrides `_ready_refusal` with its readiness predicate.
+  Held drafts were readied four times in nine days across the fleet
+  (nous-ergon-ops#1990), each time through a readying path that checked a
+  different subset of the hold forms.
+
 - **Repository-baseline gaps closed** (alpha-engine-config-I10433,
   repository-baseline-policy.md). This repo had no coverage floor at all —
   coverage could regress to 0% with nothing noticing — and no CODEOWNERS,

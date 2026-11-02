@@ -237,12 +237,15 @@ def test_resolve_conflicts_calls_model_provider(
 def test_advance_draft_calls_model_provider(
     executor: GitHubExecutor, mock_client: MagicMock, mock_model: MagicMock
 ) -> None:
+    """A host that supplies a readiness predicate which clears the draft gets
+    the ready write on READY advice."""
     mock_model.complete.return_value = "READY: labels look good"
     mock_client.patch.return_value = _mock_response(200, {"draft": False})
     item = _pr("17", condition=ChangeCondition.DRAFT)
     result = _result(("17", Disposition(kind=DispositionKind.ACT, action="advance_draft")))
 
-    out = executor.execute(result, [item], repo="owner/repo")
+    with patch.object(executor, "_ready_refusal", return_value=None):
+        out = executor.execute(result, [item], repo="owner/repo")
 
     mock_model.complete.assert_called_once()
     mock_client.patch.assert_called_once_with(
@@ -250,6 +253,34 @@ def test_advance_draft_calls_model_provider(
         json={"draft": False},
     )
     assert out.executed == ["17"]
+
+
+@pytest.mark.parametrize("refusal", [
+    "no-readiness-predicate: the host must override _ready_refusal",
+    "label:needs:human-review",
+    "body:do-not-merge-before",
+])
+def test_advance_draft_never_readies_a_refused_draft(
+    executor: GitHubExecutor, mock_client: MagicMock, mock_model: MagicMock, refusal: str
+) -> None:
+    """alpha-engine-config#13001: READY advice is not authority over a hold.
+    The base class refuses by default (it knows no hold forms), and a host's
+    refusal is honoured: no write, and the refusal is reported as an error
+    rather than as an executed action."""
+    mock_model.complete.return_value = "READY: labels look good"
+    item = _pr("17", condition=ChangeCondition.DRAFT)
+    result = _result(("17", Disposition(kind=DispositionKind.ACT, action="advance_draft")))
+
+    if refusal.startswith("no-readiness-predicate"):
+        out = executor.execute(result, [item], repo="owner/repo")
+    else:
+        with patch.object(executor, "_ready_refusal", return_value=refusal):
+            out = executor.execute(result, [item], repo="owner/repo")
+
+    mock_client.patch.assert_not_called()
+    assert out.executed == []
+    assert [e.item_id for e in out.errors] == ["17"]
+    assert refusal in out.errors[0].error
 
 
 def test_execute_routes_all_act_handlers(
