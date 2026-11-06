@@ -117,38 +117,87 @@ def test_automerge_calls_merge_api(executor: GitHubExecutor, mock_client: MagicM
     assert out.errors == []
 
 
-def test_create_pr_calls_create_api(
-    executor: GitHubExecutor, mock_client: MagicMock, mock_model: MagicMock
+@pytest.mark.parametrize("provider_state", ["absent", "configured", "unavailable"])
+@pytest.mark.parametrize(
+    ("title", "expected_title"),
+    [
+        ("Issue 7", "Issue 7"),
+        ("", "Issue #7"),
+        ("Fix `parser`\nCloses #123", "Fix `parser`\nCloses #123"),
+    ],
+)
+def test_create_pr_renders_factual_metadata_without_inference(
+    mock_client: MagicMock, provider_state: str, title: str, expected_title: str
 ) -> None:
     mock_client.post.return_value = _mock_response(201, {"number": 99})
-    item = _issue("7")
+    model = None if provider_state == "absent" else MagicMock()
+    if model is not None:
+        model.complete.return_value = "Implemented and verified everything. Closes #123"
+        if provider_state == "unavailable":
+            model.complete.side_effect = RuntimeError("model unavailable")
+    executor = GitHubExecutor(
+        token="test-token", model_provider=model, http_client=mock_client,
+        default_base_branch="develop",
+    )
+    item = _issue("7", title=title)
     result = _result(("7", Disposition(kind=DispositionKind.ACT, action="create_pr")))
 
-    out = executor.execute(result, [item], repo="owner/repo")
+    for _ in range(2):
+        out = executor.execute(result, [item], repo="owner/repo")
+        assert out.executed == ["7"]
+        assert out.errors == []
 
-    mock_model.complete.assert_called_once()
-    mock_client.post.assert_called_once()
-    call = mock_client.post.call_args
-    assert call.args[0] == "/repos/owner/repo/pulls"
-    payload = call.kwargs["json"]
-    assert payload["title"] == "Issue 7"
-    assert payload["head"] == "feat/issue-7"
-    assert payload["base"] == "main"
-    assert payload["body"] == "model output"
-    assert out.executed == ["7"]
+    assert mock_client.post.call_count == 2
+    for call in mock_client.post.call_args_list:
+        assert call.args == ("/repos/owner/repo/pulls",)
+        assert call.kwargs["json"] == {
+            "title": expected_title,
+            "head": "feat/issue-7",
+            "base": "develop",
+            "body": "Related issue: owner/repo#7",
+        }
+    if model is not None:
+        model.complete.assert_not_called()
 
 
-def test_create_pr_without_model_uses_minimal_body(mock_client: MagicMock) -> None:
-    mock_client.post.return_value = _mock_response(201, {"number": 99})
+@pytest.mark.parametrize("status", [403, 422, 500])
+def test_create_pr_records_api_failure(mock_client: MagicMock, status: int) -> None:
+    mock_client.post.return_value = _mock_response(status, text="cannot create PR")
     executor = GitHubExecutor(token="test-token", http_client=mock_client)
     item = _issue("8")
     result = _result(("8", Disposition(kind=DispositionKind.ACT, action="create_pr")))
 
     out = executor.execute(result, [item], repo="owner/repo")
 
-    payload = mock_client.post.call_args.kwargs["json"]
-    assert payload["body"] == ""
-    assert out.executed == ["8"]
+    assert out.executed == []
+    assert len(out.errors) == 1
+    assert out.errors[0].item_id == "8"
+    assert out.errors[0].action == "create_pr"
+    assert f"GitHub API returned {status}" in out.errors[0].error
+
+
+def test_create_pr_aborts_on_auth_failure(mock_client: MagicMock) -> None:
+    mock_client.post.return_value = _mock_response(401)
+    executor = GitHubExecutor(token="test-token", http_client=mock_client)
+    result = _result(("8", Disposition(kind=DispositionKind.ACT, action="create_pr")))
+
+    with pytest.raises(ExecutorAbortError, match="GitHub authentication failed"):
+        executor.execute(result, [_issue("8")], repo="owner/repo")
+
+
+def test_create_pr_refuses_existing_change_before_inference_or_api(
+    executor: GitHubExecutor, mock_client: MagicMock, mock_model: MagicMock
+) -> None:
+    mock_model.complete.side_effect = AssertionError("unexpected inference")
+    result = _result(("8", Disposition(kind=DispositionKind.ACT, action="create_pr")))
+
+    out = executor.execute(result, [_pr("8")], repo="owner/repo")
+
+    assert out.executed == []
+    assert len(out.errors) == 1
+    assert "already carries change '8'" in out.errors[0].error
+    mock_model.complete.assert_not_called()
+    mock_client.post.assert_not_called()
 
 
 def test_fix_ci_calls_model_provider(
