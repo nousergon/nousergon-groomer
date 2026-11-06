@@ -43,6 +43,16 @@ While the major version is `0`, the public API may change between minor versions
     suite) — that is a branch-protection change owned by the fleet-wide
     baseline session, not this repo's PR.
 
+## [0.11.2] — 2026-11-06
+
+### Fixed
+
+- PR creation renders a stable related-issue reference without calling the
+  model provider (alpha-engine-config-I13358). Configuring a provider or an
+  inference outage no longer changes the PR body or prevents creation. The
+  metadata-only body makes no implementation, verification or completion
+  claims; title fallback, head/base naming and API error handling are preserved.
+
 ## [0.11.1] — 2026-08-06
 
 ### Fixed

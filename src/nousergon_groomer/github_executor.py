@@ -341,13 +341,8 @@ class GitHubExecutor:
                 f"create_pr requires an item with no change yet; item {item.id!r} "
                 f"already carries change {item.change.ref!r}"
             )
-        body = ""
-        if self._model_provider is not None:
-            prompt = (
-                f"Write a pull request description for GitHub issue #{item.id} "
-                f"titled {item.title!r}. Return only the markdown body."
-            )
-            body = self._model_provider.complete(prompt, model=self._model)
+        # Metadata alone cannot establish implementation or verification claims.
+        body = f"Related issue: {repo}#{item.id}"
         title = item.title or f"Issue #{item.id}"
         head = f"feat/issue-{item.id}"
         response = self._client.post(
