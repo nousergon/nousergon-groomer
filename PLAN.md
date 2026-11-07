@@ -1,5 +1,13 @@
 # PLAN — nousergon-groomer v0.1.0
 
+## v0.11.2 — deterministic PR metadata
+
+`GitHubExecutor._create_pr` renders `Related issue: <repo>#<issue-id>`
+from structured metadata with no model call (alpha-engine-config-I13358).
+The body is identical with a provider configured, unavailable or absent;
+it does not infer implementation results, verification or issue completion.
+Model leaves for other actions remain unchanged.
+
 ## What this repo is
 
 The **deterministic control plane** for the autonomous backlog-and-PR
